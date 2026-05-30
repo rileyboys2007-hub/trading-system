@@ -1,0 +1,80 @@
+[
+  {
+    "_name": "Reversal Long — RSI oversold off key support",
+    "_curl": "curl -X POST http://localhost:3000/webhook -H \"Content-Type: application/json\" -d @reversal-long.json",
+    "secret": "your_secret_token_here",
+    "symbol": "NQ1!",
+    "timeframe": "5",
+    "setup": "REVERSAL_LONG",
+    "entry": 30250.00,
+    "sl": 30210.00,
+    "tp1": 30310.00,
+    "tp2": 30390.00,
+    "notes": "RSI oversold + PDL bounce + bullish wick"
+  },
+  {
+    "_name": "Reversal Short — RSI overbought at resistance",
+    "_curl": "curl -X POST http://localhost:3000/webhook -H \"Content-Type: application/json\" -d @reversal-short.json",
+    "secret": "your_secret_token_here",
+    "symbol": "NQ1!",
+    "timeframe": "5",
+    "setup": "REVERSAL_SHORT",
+    "entry": 30520.00,
+    "sl": 30558.00,
+    "tp1": 30460.00,
+    "tp2": 30380.00,
+    "notes": "RSI overbought + PDH rejection + bearish engulf"
+  },
+  {
+    "_name": "Breakout Long — 30-bar high break with volume",
+    "_curl": "curl -X POST http://localhost:3000/webhook -H \"Content-Type: application/json\" -d @breakout-long.json",
+    "secret": "your_secret_token_here",
+    "symbol": "NQ1!",
+    "timeframe": "5",
+    "setup": "BREAKOUT_LONG",
+    "entry": 30450.00,
+    "sl": 30400.00,
+    "tp1": 30520.00,
+    "tp2": 30620.00,
+    "notes": "30-bar high break + EMA9>EMA21 + 2x volume surge"
+  },
+  {
+    "_name": "Breakout Short — 30-bar low break",
+    "_curl": "curl -X POST http://localhost:3000/webhook -H \"Content-Type: application/json\" -d @breakout-short.json",
+    "secret": "your_secret_token_here",
+    "symbol": "NQ1!",
+    "timeframe": "5",
+    "setup": "BREAKOUT_SHORT",
+    "entry": 30100.00,
+    "sl": 30148.00,
+    "tp1": 30030.00,
+    "tp2": 29940.00,
+    "notes": "30-bar low break + EMA9<EMA21 + big body candle"
+  },
+  {
+    "_name": "VWAP Reclaim Long — price reclaims VWAP from below",
+    "_curl": "curl -X POST http://localhost:3000/webhook -H \"Content-Type: application/json\" -d @vwap-long.json",
+    "secret": "your_secret_token_here",
+    "symbol": "NQ1!",
+    "timeframe": "5",
+    "setup": "VWAP_RECLAIM_LONG",
+    "entry": 30330.00,
+    "sl": 30295.00,
+    "tp1": 30385.00,
+    "tp2": 30450.00,
+    "notes": "Close above VWAP after failed breakdown"
+  },
+  {
+    "_name": "Liquidity Sweep Long — stop hunt below equal lows then rip",
+    "_curl": "curl -X POST http://localhost:3000/webhook -H \"Content-Type: application/json\" -d @sweep-long.json",
+    "secret": "your_secret_token_here",
+    "symbol": "NQ1!",
+    "timeframe": "5",
+    "setup": "LIQUIDITY_SWEEP_LONG",
+    "entry": 30180.00,
+    "sl": 30145.00,
+    "tp1": 30260.00,
+    "tp2": 30350.00,
+    "notes": "Swept equal lows at 30155 then closed back above"
+  }
+]

@@ -1,0 +1,181 @@
+{
+  "_description": "Example liquidity sweep scenarios — what each detection looks like in practice",
+
+  "scenarios": [
+
+    {
+      "id": "PDH_REJECTED_SHORT",
+      "name": "PDH Sweep → Rejected → Short Setup",
+      "description": "Price wicks above Previous Day High (sell-side liquidity), triggers stops, then snaps back below. Classic ICT/SMC short signal.",
+      "setup": {
+        "PDH": 30344.50,
+        "currentPrice": 30330.00
+      },
+      "bar": { "open": 30335.00, "high": 30358.00, "low": 30328.00, "close": 30331.00 },
+      "expectedOutput": {
+        "sweepDetected": true,
+        "level": "PDH",
+        "levelPrice": 30344.50,
+        "type": "HIGH",
+        "result": "REJECTED",
+        "sweepAmount": 13.50,
+        "rejectionStrength": 0.99,
+        "impliedBias": "SHORT",
+        "barsAgo": 0
+      },
+      "trade_note": "Wait for close below PDH. Short entry on next bar open or retest of PDH from below. SL above bar high (30358). Target ONL or next support."
+    },
+
+    {
+      "id": "PDL_REJECTED_LONG",
+      "name": "PDL Sweep → Rejected → Long Setup",
+      "description": "Price wicks below Previous Day Low (buy-side liquidity), triggers stops, then snaps back above. Classic long entry after stop hunt.",
+      "setup": {
+        "PDL": 29763.00,
+        "currentPrice": 29790.00
+      },
+      "bar": { "open": 29775.00, "high": 29782.00, "low": 29748.00, "close": 29778.00 },
+      "expectedOutput": {
+        "sweepDetected": true,
+        "level": "PDL",
+        "levelPrice": 29763.00,
+        "type": "LOW",
+        "result": "REJECTED",
+        "sweepAmount": 15.00,
+        "rejectionStrength": 1.00,
+        "impliedBias": "LONG",
+        "barsAgo": 0
+      },
+      "trade_note": "Wait for close above PDL. Long entry on next bar or retest of PDL from above. SL below bar low (29748). Target ONH or PDH."
+    },
+
+    {
+      "id": "ONH_REJECTED_SHORT",
+      "name": "ONH Sweep → Rejected → Short Setup",
+      "description": "Price sweeps overnight high during RTH open, fails to hold, reverses. Indicates institutional selling above overnight range.",
+      "setup": {
+        "ONH": 30384.50,
+        "currentPrice": 30370.00
+      },
+      "bar": { "open": 30378.00, "high": 30396.00, "low": 30366.00, "close": 30371.00 },
+      "expectedOutput": {
+        "sweepDetected": true,
+        "level": "ONH",
+        "levelPrice": 30384.50,
+        "type": "HIGH",
+        "result": "REJECTED",
+        "sweepAmount": 11.50,
+        "rejectionStrength": 0.91,
+        "impliedBias": "SHORT",
+        "barsAgo": 0
+      },
+      "trade_note": "ONH rejection during opening hour = strong signal. Short below ONH. Target ONL. More reliable if PDH was also nearby (stacked resistance)."
+    },
+
+    {
+      "id": "ONL_REJECTED_LONG",
+      "name": "ONL Sweep → Rejected → Long Setup",
+      "description": "Price dips below overnight low, sweeps buy-stops, then recovers. Common during first 30 minutes of RTH.",
+      "setup": {
+        "ONL": 30216.50,
+        "currentPrice": 30240.00
+      },
+      "bar": { "open": 30228.00, "high": 30235.00, "low": 30204.00, "close": 30230.00 },
+      "expectedOutput": {
+        "sweepDetected": true,
+        "level": "ONL",
+        "levelPrice": 30216.50,
+        "type": "LOW",
+        "result": "REJECTED",
+        "sweepAmount": 12.50,
+        "rejectionStrength": 1.00,
+        "impliedBias": "LONG",
+        "barsAgo": 0
+      },
+      "trade_note": "ONL reject + close back above ONL = long. Especially strong if aligning with daily bias BULLISH. Target ONH or higher."
+    },
+
+    {
+      "id": "ORH_ACCEPTED_LONG",
+      "name": "ORH Sweep → Accepted → Breakout Long",
+      "description": "Price breaks above Opening Range High and closes above it — NOT a reversal. This is a confirmed ORB breakout, not a stop hunt.",
+      "setup": {
+        "ORH": 30520.75,
+        "currentPrice": 30545.00
+      },
+      "bar": { "open": 30510.00, "high": 30548.00, "low": 30508.00, "close": 30542.00 },
+      "expectedOutput": {
+        "sweepDetected": true,
+        "level": "ORH",
+        "levelPrice": 30520.75,
+        "type": "HIGH",
+        "result": "ACCEPTED",
+        "sweepAmount": 27.25,
+        "rejectionStrength": 0,
+        "impliedBias": "LONG",
+        "barsAgo": 0
+      },
+      "trade_note": "ACCEPTED = breakout confirmed. Long with SL below ORH. This is a momentum trade, not a reversal. Filter with internals: only trade if BULLISH or STRONG_BULLISH."
+    },
+
+    {
+      "id": "ORL_REJECTED_LONG",
+      "name": "ORL Sweep → Rejected → Long Setup",
+      "description": "Price briefly dips below Opening Range Low, sweeps stops, then immediately recovers above ORL. Common AM false breakdown.",
+      "setup": {
+        "ORL": 30364.75,
+        "currentPrice": 30380.00
+      },
+      "bar": { "open": 30370.00, "high": 30375.00, "low": 30354.00, "close": 30372.00 },
+      "expectedOutput": {
+        "sweepDetected": true,
+        "level": "ORL",
+        "levelPrice": 30364.75,
+        "type": "LOW",
+        "result": "REJECTED",
+        "sweepAmount": 10.75,
+        "rejectionStrength": 0.68,
+        "impliedBias": "LONG",
+        "barsAgo": 0
+      },
+      "trade_note": "ORL sweep+reject during first hour after OR forms. Long entry with SL below bar low (30354). Best when daily bias is BULLISH and market internals BULLISH/MIXED."
+    },
+
+    {
+      "id": "STACKED_SWEEP",
+      "name": "Stacked Sweep — PDL + ONL Together",
+      "description": "Price sweeps BOTH PDL and ONL on the same bar — maximum stop concentration. The reversal from a stacked sweep is the highest quality long setup.",
+      "setup": {
+        "PDL": 29763.00,
+        "ONL": 29758.00,
+        "currentPrice": 29800.00
+      },
+      "bar": { "open": 29775.00, "high": 29782.00, "low": 29744.00, "close": 29779.00 },
+      "expectedOutput": [
+        {
+          "level": "PDL", "result": "REJECTED", "sweepAmount": 19.00, "rejectionStrength": 0.84, "impliedBias": "LONG"
+        },
+        {
+          "level": "ONL", "result": "REJECTED", "sweepAmount": 14.00, "rejectionStrength": 1.00, "impliedBias": "LONG"
+        }
+      ],
+      "trade_note": "Two levels swept simultaneously = extremely high-quality reversal setup. Both rejections + LONG bias = strong long entry. Size up here if risk management allows."
+    },
+
+    {
+      "id": "WEAK_SWEEP_FILTERED",
+      "name": "Weak Sweep — Below Minimum Threshold",
+      "description": "Price barely ticks above PDH by 0.5 points — not enough to constitute a real sweep. Filtered out by minSweepPts setting.",
+      "setup": {
+        "PDH": 30344.50,
+        "currentPrice": 30343.00
+      },
+      "bar": { "open": 30341.00, "high": 30345.00, "low": 30339.00, "close": 30342.00 },
+      "expectedOutput": {
+        "sweepDetected": false,
+        "reason": "Wick of 0.5 pts is below minSweepPts threshold of 1.0 pts"
+      },
+      "trade_note": "Not every tick above a level is a sweep. The minSweepPts filter prevents noise from triggering false signals."
+    }
+  ]
+}
