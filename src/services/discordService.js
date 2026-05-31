@@ -35,7 +35,7 @@ async function send(title, description, type = "info", fields = []) {
       description,
       color:  COLORS[type] || COLORS.info,
       fields,
-      footer: { text: `Trading System • ${new Date().toLocaleTimeString("en-US", { timeZone: "America/New_York" })} ET` },
+      footer: { text: `Trading System • ${new Date().toLocaleTimeString("en-US", { timeZone: "America/Los_Angeles", hour: "2-digit", minute: "2-digit" })} PT` },
     }],
   };
 

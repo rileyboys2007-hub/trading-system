@@ -68,7 +68,7 @@ function isRTH() {
   });
   const [h, m] = s.split(":").map(Number);
   const mins = h * 60 + m;
-  return mins >= 570 && mins < 960;   // 9:30 AM – 4:00 PM ET
+  return mins >= 570 && mins < 960;   // 6:30 AM – 1:00 PM PT (9:30 AM – 4:00 PM ET)
 }
 
 /**

@@ -204,7 +204,7 @@ function start() {
   }
 
   intervalHandle = setInterval(tick, SCAN_INTERVAL_MS);
-  logger.info(`[marketScanner] Started — scanning ${SYMBOL} every ${SCAN_INTERVAL_MS / 60000} min during RTH`);
+  logger.info(`[marketScanner] Started — scanning ${SYMBOL} every ${SCAN_INTERVAL_MS / 60000} min during RTH (6:30 AM – 1:00 PM PT)`);
 
   // Run immediately if in RTH, otherwise wait for first interval
   if (isRTH()) tick();
