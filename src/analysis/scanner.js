@@ -68,7 +68,14 @@ function isRTH() {
   });
   const [h, m] = s.split(":").map(Number);
   const mins = h * 60 + m;
-  return mins >= 570 && mins < 960;   // 6:30 AM – 1:00 PM PT (9:30 AM – 4:00 PM ET)
+
+  // CME maintenance break: 5:00–6:00 PM ET (2:00–3:00 PM PT) — NQ doesn't trade
+  const inMaintenance = mins >= 1020 && mins < 1080;
+  if (inMaintenance) return false;
+
+  // 6:30 AM – 7:00 PM PT  =  9:30 AM – 10:00 PM ET
+  // Covers: RTH + post-market + Asia session open
+  return mins >= 570 && mins < 1320;
 }
 
 /**
