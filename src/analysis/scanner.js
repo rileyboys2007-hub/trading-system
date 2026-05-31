@@ -139,9 +139,9 @@ function buildSignal(symbol, direction, currentPrice, sweepLevel, sweepLevelPric
  * @param {string} symbol — e.g. "NQ=F"
  * @returns {object} scan result
  */
-async function runScan(symbol = "NQ=F") {
+async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
 
-  if (!isRTH()) {
+  if (!isRTH() && !forceRun) {
     return { triggered: false, reason: "Outside RTH (9:30 AM – 4:00 PM ET, weekdays only)" };
   }
 
@@ -284,4 +284,9 @@ async function runScan(symbol = "NQ=F") {
   };
 }
 
-module.exports = { runScan, isRTH };
+/** Test wrapper — bypasses RTH check, always runs pipeline */
+async function runScanForced(symbol = "NQ=F") {
+  return runScan(symbol, { forceRun: true });
+}
+
+module.exports = { runScan, runScanForced, isRTH };
