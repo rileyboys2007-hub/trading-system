@@ -327,22 +327,26 @@ function scoreLiquiditySweep(sweepResult, direction) {
 function scorePlaybookQuality(playbookResult, direction) {
   if (!playbookResult) return { score: 40, explanation: "Playbook data unavailable" };
 
-  const { primaryMatch, matchedPlaybooks } = playbookResult;
+  const { primaryMatch, matchedPlaybooks, allPlaybooks } = playbookResult;
 
-  // Best case: primary match aligned with direction
-  if (primaryMatch && primaryMatch.direction === direction) {
-    const conf  = primaryMatch.confidence;
+  // Best case: find the highest-confidence matched playbook for THIS direction
+  const dirMatch = (matchedPlaybooks || [])
+    .filter(p => p.direction === direction)
+    .sort((a, b) => b.confidence - a.confidence)[0] || null;
+
+  if (dirMatch) {
+    const conf  = dirMatch.confidence;
     const score = Math.round(55 + (conf / 100) * 45); // 55–100
     return {
       score,
-      playbook:   primaryMatch.name,
+      playbook:   dirMatch.name,
       confidence: conf,
       aligned:    true,
-      explanation: `✓ "${primaryMatch.name}" matched at ${conf}% confidence — aligned with ${direction}`,
+      explanation: `✓ "${dirMatch.name}" matched at ${conf}% confidence — aligned with ${direction}`,
     };
   }
 
-  // Match exists but wrong direction
+  // Match exists but all matches are opposite direction
   if (primaryMatch && primaryMatch.direction !== direction) {
     return {
       score: 10,
@@ -352,8 +356,8 @@ function scorePlaybookQuality(playbookResult, direction) {
     };
   }
 
-  // Partial match (high confidence but below threshold)
-  const allSorted = (playbookResult.allPlaybooks || [])
+  // Partial match (high confidence but below the 55% match threshold)
+  const allSorted = (allPlaybooks || [])
     .filter(p => p.direction === direction)
     .sort((a, b) => b.confidence - a.confidence);
 

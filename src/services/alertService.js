@@ -187,7 +187,7 @@ async function process(signal) {
       safe("levels",    () => getKeyLevels(signal.symbol)),
       safe("internals", () => getMarketInternals()),
       safe("liquidity", () => detectLiquiditySweeps({ direction: signal.direction, symbol: signal.symbol })),
-      safe("playbooks", () => detectPlaybooks({ direction: signal.direction, symbol: signal.symbol })),
+      safe("playbooks", () => detectPlaybooks(signal.symbol)),  // fixed: pass string, not object
       safe("vwap",      () => calculateVWAP(signal.symbol)),
     ]);
 
@@ -197,8 +197,8 @@ async function process(signal) {
       symbol:    signal.symbol,
       bias,
       internals,
-      sweep:     sweepResult?.activeSignal ?? null,
-      playbook:  playbookResult?.bestMatch  ?? null,
+      sweep:     sweepResult,      // fixed: full result, not raw activeSignal
+      playbook:  playbookResult,   // fixed: full result, not bestMatch
       vwap:      vwapData,
       newsRisk:  newsCheck,
     }));

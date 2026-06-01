@@ -89,10 +89,15 @@ function scoreDirection(sweepResult, playbookResult, direction) {
   const sweep       = sweepResult?.activeSignal ?? null;
   // Sweep must be aligned: a REJECTED sweep that implies the same direction we want
   const sweepActive = sweep !== null && sweep.impliedBias === direction && sweep.result === "REJECTED";
-  const playbookHit = playbookResult?.bestMatch?.aligned === true;
+
+  // Find the best matched playbook for this specific direction (detectPlaybooks returns all)
+  const bestMatch = (playbookResult?.matchedPlaybooks ?? [])
+    .filter(p => p.direction === direction)
+    .sort((a, b) => b.confidence - a.confidence)[0] ?? null;
+  const playbookHit = bestMatch !== null;
 
   const score = (sweepActive ? 2 : 0) + (playbookHit ? 1 : 0);
-  return { score, sweep: sweepActive ? sweep : null, playbook: playbookResult?.bestMatch ?? null };
+  return { score, sweep: sweepActive ? sweep : null, playbook: bestMatch };
 }
 
 /**
@@ -176,16 +181,14 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
     levels,
     longSweep,
     shortSweep,
-    longPlaybook,
-    shortPlaybook,
+    playbookResult,
     vwapData,
   ] = await Promise.all([
-    safe("levels",         () => getKeyLevels(symbol)),
-    safe("sweep:LONG",     () => detectLiquiditySweeps({ direction: "LONG",  symbol })),
-    safe("sweep:SHORT",    () => detectLiquiditySweeps({ direction: "SHORT", symbol })),
-    safe("playbook:LONG",  () => detectPlaybooks({ direction: "LONG",  symbol })),
-    safe("playbook:SHORT", () => detectPlaybooks({ direction: "SHORT", symbol })),
-    safe("vwap",           () => calculateVWAP(symbol)),
+    safe("levels",    () => getKeyLevels(symbol)),
+    safe("sweep:LONG",  () => detectLiquiditySweeps({ direction: "LONG",  symbol })),
+    safe("sweep:SHORT", () => detectLiquiditySweeps({ direction: "SHORT", symbol })),
+    safe("playbooks", () => detectPlaybooks(symbol)),   // fixed: pass string, not object
+    safe("vwap",      () => calculateVWAP(symbol)),
   ]);
 
   if (!levels) {
@@ -195,8 +198,8 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
   const currentPrice = levels.currentPrice;
 
   // ── Step 2: Score each direction ─────────────────────────────
-  const longTriggers  = scoreDirection(longSweep,  longPlaybook,  "LONG");
-  const shortTriggers = scoreDirection(shortSweep, shortPlaybook, "SHORT");
+  const longTriggers  = scoreDirection(longSweep,  playbookResult, "LONG");
+  const shortTriggers = scoreDirection(shortSweep, playbookResult, "SHORT");
 
   logger.info(
     `[scanner] Triggers — LONG: ${longTriggers.score} | SHORT: ${shortTriggers.score} | Price: ${currentPrice}`
@@ -260,8 +263,8 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
     symbol,
     bias,
     internals,
-    sweep:    activeTriggers.sweep,
-    playbook: activeTriggers.playbook,
+    sweep:    direction === "LONG" ? longSweep : shortSweep,  // full result, not raw signal
+    playbook: playbookResult,   // full result for direction-aware scoring
     vwap:     vwapData,
     newsRisk: newsCheck,
   }));
