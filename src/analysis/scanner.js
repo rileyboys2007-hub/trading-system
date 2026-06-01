@@ -230,11 +230,24 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
   if (longRank === 0 && shortRank === 0) {
     return { triggered: false, reason: "No setup triggers — no sweep or aligned playbook detected" };
   } else if (longRank === shortRank) {
-    return {
-      triggered: false,
-      reason: "Ambiguous signals — LONG and SHORT equally matched, no sweep to determine direction",
-      longScore: longTriggers.score, shortScore: shortTriggers.score,
-    };
+    // Tie-break using VWAP: price above VWAP → LONG, below → SHORT
+    if (vwapData && vwapData.position !== "AT") {
+      if (vwapData.aboveVWAP) {
+        logger.info(`[scanner] Playbook tie — VWAP above (${vwapData.distancePts} pts) favors LONG`);
+        direction      = "LONG";
+        activeTriggers = longTriggers;
+      } else {
+        logger.info(`[scanner] Playbook tie — VWAP below (${vwapData.distancePts} pts) favors SHORT`);
+        direction      = "SHORT";
+        activeTriggers = shortTriggers;
+      }
+    } else {
+      return {
+        triggered: false,
+        reason: "Ambiguous signals — LONG and SHORT equally matched, VWAP at midpoint — no direction edge",
+        longScore: longTriggers.score, shortScore: shortTriggers.score,
+      };
+    }
   } else if (longRank > shortRank) {
     direction       = "LONG";
     activeTriggers  = longTriggers;
