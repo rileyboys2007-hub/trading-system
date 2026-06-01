@@ -82,14 +82,17 @@ function isRTH() {
 
 /**
  * Score trigger strength for one direction.
+ * Only counts a sweep if it's actually ALIGNED with the intended direction.
  * Returns: { score, sweep, playbook }
  */
-function scoreDirection(sweepResult, playbookResult) {
-  const sweepActive  = !!sweepResult?.activeSignal;
-  const playbookHit  = playbookResult?.bestMatch?.aligned === true;
+function scoreDirection(sweepResult, playbookResult, direction) {
+  const sweep       = sweepResult?.activeSignal ?? null;
+  // Sweep must be aligned: a REJECTED sweep that implies the same direction we want
+  const sweepActive = sweep !== null && sweep.impliedBias === direction && sweep.result === "REJECTED";
+  const playbookHit = playbookResult?.bestMatch?.aligned === true;
 
   const score = (sweepActive ? 2 : 0) + (playbookHit ? 1 : 0);
-  return { score, sweep: sweepResult?.activeSignal ?? null, playbook: playbookResult?.bestMatch ?? null };
+  return { score, sweep: sweepActive ? sweep : null, playbook: playbookResult?.bestMatch ?? null };
 }
 
 /**
@@ -192,8 +195,8 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
   const currentPrice = levels.currentPrice;
 
   // ── Step 2: Score each direction ─────────────────────────────
-  const longTriggers  = scoreDirection(longSweep,  longPlaybook);
-  const shortTriggers = scoreDirection(shortSweep, shortPlaybook);
+  const longTriggers  = scoreDirection(longSweep,  longPlaybook,  "LONG");
+  const shortTriggers = scoreDirection(shortSweep, shortPlaybook, "SHORT");
 
   logger.info(
     `[scanner] Triggers — LONG: ${longTriggers.score} | SHORT: ${shortTriggers.score} | Price: ${currentPrice}`
