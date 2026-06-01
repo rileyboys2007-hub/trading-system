@@ -220,21 +220,27 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
     };
   }
 
-  // Determine direction: winner must score ≥ 2
+  // Determine direction using a composite rank:
+  //   sweep aligned = 200 pts (dominant)  |  playbook confidence = tiebreaker (0–100)
+  const longRank  = (longTriggers.score  >= 2 ? 200 : 0) + (longTriggers.playbook?.confidence  ?? 0);
+  const shortRank = (shortTriggers.score >= 2 ? 200 : 0) + (shortTriggers.playbook?.confidence ?? 0);
+
   let direction, activeTriggers;
-  if (longTriggers.score >= shortTriggers.score && longTriggers.score >= 2) {
-    direction       = "LONG";
-    activeTriggers  = longTriggers;
-  } else if (shortTriggers.score > longTriggers.score && shortTriggers.score >= 2) {
-    direction       = "SHORT";
-    activeTriggers  = shortTriggers;
-  } else {
-    // Only one trigger (score = 1) — not enough conviction without both sweep + playbook
-    const stronger = longTriggers.score >= shortTriggers.score ? "LONG" : "SHORT";
+
+  if (longRank === 0 && shortRank === 0) {
+    return { triggered: false, reason: "No setup triggers — no sweep or aligned playbook detected" };
+  } else if (longRank === shortRank) {
     return {
       triggered: false,
-      reason: `Weak trigger only (score: 1) for ${stronger} — need sweep + playbook for scanner confidence`,
+      reason: "Ambiguous signals — LONG and SHORT equally matched, no sweep to determine direction",
+      longScore: longTriggers.score, shortScore: shortTriggers.score,
     };
+  } else if (longRank > shortRank) {
+    direction       = "LONG";
+    activeTriggers  = longTriggers;
+  } else {
+    direction       = "SHORT";
+    activeTriggers  = shortTriggers;
   }
 
   // ── Step 3: Build synthetic signal ───────────────────────────

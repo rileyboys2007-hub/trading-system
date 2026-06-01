@@ -22,7 +22,7 @@ const yf    = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
 const logger = require("../utils/logger");
 const { getKeyLevels } = require("./levels");
 
-const MATCH_THRESHOLD = 0.55;  // 55% of weighted score to count as "matched"
+const MATCH_THRESHOLD = 55;    // 55% of weighted score to count as "matched" (integer avoids float precision bugs)
 const BARS_NEEDED     = 30;    // 5m bars for trend context (~2.5 hours)
 
 // ── Data Fetcher ──────────────────────────────────────────────────
@@ -352,7 +352,7 @@ function notMatched(reason) {
 
 function buildResult(id, name, direction, conditions, extras = {}) {
   const scored  = scoreConditions(conditions);
-  const matched = scored.confidence >= MATCH_THRESHOLD * 100;
+  const matched = scored.confidence >= MATCH_THRESHOLD;
 
   return {
     id,

@@ -148,6 +148,15 @@ function scoreSessionQuality() {
   } else if (totalMin >= 750 && totalMin < 780) {
     score = 60; session = "Early afternoon (12:30–1:00 PM)";
     explanation = "Transitioning out of lunch — volume picking back up";
+  } else if (totalMin >= 960 && totalMin < 1020) {
+    score = 50; session = "Post-market (4:00–5:00 PM)";
+    explanation = "Post-RTH — order flow thinning, still directional but use caution";
+  } else if (totalMin >= 1080 && totalMin < 1200) {
+    score = 55; session = "Extended / Asia open (6:00–8:00 PM)";
+    explanation = "Asia session open — NQ can trend; watch for overnight continuation";
+  } else if (totalMin >= 1200 && totalMin < 1320) {
+    score = 45; session = "Asia mid-session (8:00–10:00 PM)";
+    explanation = "Asia mid-session — lower liquidity, setups require strong sweep or playbook";
   } else if (totalMin >= 240 && totalMin < 570) {
     score = 30; session = "Pre-market (4:00–9:30 AM)";
     explanation = "Pre-market — thin liquidity, gaps possible. Lower conviction setups";
