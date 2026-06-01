@@ -244,8 +244,8 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
   const signal = buildSignal(symbol, direction, currentPrice, sweepLevel, sweepLevelPrice);
 
   // Attach setup name from playbook if matched
-  if (activeTriggers.playbook?.playbook) {
-    signal.setup = activeTriggers.playbook.playbook;
+  if (activeTriggers.playbook?.name) {
+    signal.setup = activeTriggers.playbook.name;
   } else if (activeTriggers.sweep?.level) {
     signal.setup = direction === "LONG"
       ? `${activeTriggers.sweep.level}_SWEEP_REVERSAL_LONG`
@@ -285,7 +285,7 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
   // ── Step 5: Assemble result ───────────────────────────────────
   const triggerSummary = [
     activeTriggers.sweep    ? `Sweep: ${activeTriggers.sweep.level} (${activeTriggers.sweep.result})` : null,
-    activeTriggers.playbook ? `Playbook: ${activeTriggers.playbook.playbook} (${activeTriggers.playbook.confidence}%)` : null,
+    activeTriggers.playbook ? `Playbook: ${activeTriggers.playbook.name} (${activeTriggers.playbook.confidence}%)` : null,
     vwapData ? `VWAP: ${vwapData.position} @ ${vwapData.vwap} (${vwapData.slopeDir})` : null,
   ].filter(Boolean).join(" | ");
 
