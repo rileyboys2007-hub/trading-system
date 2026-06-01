@@ -25,9 +25,11 @@ const { getKeyLevels }          = require("../analysis/levels");
 const { getMarketInternals }    = require("../analysis/internals");
 const { detectLiquiditySweeps } = require("../analysis/liquidity");
 const { detectPlaybooks }       = require("../analysis/playbooks");
+const { calculateVWAP }         = require("../analysis/vwap");
 const { scoreSignal }           = require("../analysis/scoring");
 const { makeDecision }          = require("../analysis/decision");
 const { checkPreTrade }         = require("../analysis/riskManagement");
+const { getNewsRisk }           = require("../services/newsRisk");
 
 // ── Helpers ───────────────────────────────────────────────────────
 
@@ -55,7 +57,7 @@ function directionColor(direction, decision) {
 
 // ── Discord Message Builder ───────────────────────────────────────
 
-function buildDiscordMessage(signal, decision, scoreResult, riskCheck, levels) {
+function buildDiscordMessage(signal, decision, scoreResult, riskCheck, levels, vwapData) {
   const { direction, entry, sl, tp1, tp2, symbol, setup, rr1, rr2, slPoints } = signal;
   const emoji  = decisionEmoji(decision.decision);
   const color  = directionColor(direction, decision.decision);
@@ -109,6 +111,15 @@ function buildDiscordMessage(signal, decision, scoreResult, riskCheck, levels) {
     inline: false,
   });
 
+  // VWAP field
+  if (vwapData) {
+    fields.push({
+      name:   "📈 VWAP",
+      value:  `${vwapData.vwap} | Price ${vwapData.position} by ${vwapData.distancePts} pts | Slope: ${vwapData.slopeDir}`,
+      inline: false,
+    });
+  }
+
   // Nearest key levels if available
   if (levels) {
     const res = levels.nearestResistance;
@@ -157,13 +168,27 @@ async function process(signal) {
   signalStore.update(signal.id, { status: SIGNAL_STATUS.ANALYZING });
 
   try {
+    // ── News gate first — abort before expensive calls if EXTREME ──
+    const newsCheck = await safe("news", () => getNewsRisk());
+    if (newsCheck?.riskLevel === "EXTREME") {
+      await discord.send(
+        `⛔ NEWS BLOCK — ${signal.symbol} ${signal.direction}`,
+        `TradingView alert received but blocked: ${newsCheck.explanation}`,
+        "warning",
+        [{ name: "📅 Event", value: newsCheck.nextEvent?.title ?? "Unknown event", inline: false }]
+      );
+      signalStore.update(signal.id, { status: SIGNAL_STATUS.RECEIVED, newsBlocked: true });
+      return { signalId: signal.id, decision: "AVOID", newsBlocked: true };
+    }
+
     // ── Run all modules in parallel ──────────────────────────────
-    const [bias, levels, internals, sweepResult, playbookResult] = await Promise.all([
+    const [bias, levels, internals, sweepResult, playbookResult, vwapData] = await Promise.all([
       safe("bias",      () => getDailyBias()),
       safe("levels",    () => getKeyLevels(signal.symbol)),
       safe("internals", () => getMarketInternals()),
       safe("liquidity", () => detectLiquiditySweeps({ direction: signal.direction, symbol: signal.symbol })),
       safe("playbooks", () => detectPlaybooks({ direction: signal.direction, symbol: signal.symbol })),
+      safe("vwap",      () => calculateVWAP(signal.symbol)),
     ]);
 
     // ── Score and decide ─────────────────────────────────────────
@@ -174,6 +199,8 @@ async function process(signal) {
       internals,
       sweep:     sweepResult?.activeSignal ?? null,
       playbook:  playbookResult?.bestMatch  ?? null,
+      vwap:      vwapData,
+      newsRisk:  newsCheck,
     }));
 
     const decision = await safe("decision", () => makeDecision({
@@ -226,6 +253,7 @@ async function process(signal) {
         scoreResult ?? { grade: "?", totalScore: 0, recommendation: "No score", factors: {} },
         resolvedRisk,
         levels,
+        vwapData,
       );
 
       // Add risk block warning to title if blocked

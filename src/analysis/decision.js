@@ -103,10 +103,10 @@ function computeDecision(scoreResult) {
     return { decision: "AVOID", triggeredRules, greenCount };
   }
 
-  // Check STRONG TAKE criteria
+  // Check STRONG TAKE criteria (now 8 factors — need 6 green)
   const canStrongTake =
     totalScore >= 87 &&
-    greenCount >= 5 &&
+    greenCount >= 6 &&
     factors.playbookQuality?.aligned &&
     (factors.dailyBias?.aligned || factors.internals?.aligned) &&
     !["HIGH", "EXTREME"].includes(factors.newsRisk?.riskLevel);
@@ -154,6 +154,10 @@ function buildReasons(decision, scoreResult, triggeredRules, greenCount) {
   if (factors.newsRisk?.score === 100) {
     reasons.for.push("Clear news runway — no high-impact events in next 2 hours");
   }
+  if (factors.vwap?.score >= 75) {
+    const v = factors.vwap;
+    reasons.for.push(`VWAP ${v.position} (${v.distancePts} pts) | slope ${v.slopeDir} — institutional flow aligned`);
+  }
 
   // --- AGAINST reasons (weak factors) ---
   if (!factors.playbookQuality?.aligned) {
@@ -173,6 +177,9 @@ function buildReasons(decision, scoreResult, triggeredRules, greenCount) {
   }
   if (factors.liquiditySweep?.score < 35) {
     reasons.against.push(factors.liquiditySweep?.explanation || "No sweep confirmation");
+  }
+  if (factors.vwap && factors.vwap.score < 40) {
+    reasons.against.push(`VWAP opposing: price ${factors.vwap.position} (${factors.vwap.distancePts} pts) — fighting institutional flow`);
   }
 
   // --- BLOCKING reasons (hard rules that fired) ---
@@ -225,7 +232,7 @@ function buildPrimaryReason(decision, scoreResult, reasons) {
 
 function calcDecisionConfidence(decision, scoreResult, greenCount) {
   const { totalScore } = scoreResult;
-  const greenPct = greenCount / 7;
+  const greenPct = greenCount / 8;   // now 8 factors
 
   // How sure are we that this is the right call?
   if (decision === "STRONG TAKE") return Math.min(95, Math.round(80 + greenPct * 15));
@@ -275,7 +282,7 @@ async function makeDecision(opts = {}) {
       recommendation: scoreResult.recommendation,
     },
     greenFactors:   greenCount,
-    totalFactors:   7,
+    totalFactors:   8,
     blockedBy:      triggeredRules.map(r => ({ id: r.id, label: r.label, severity: r.severity })),
     factorSummary: Object.fromEntries(
       Object.entries(scoreResult.factors).map(([k, f]) => [

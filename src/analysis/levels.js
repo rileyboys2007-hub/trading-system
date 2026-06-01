@@ -8,6 +8,8 @@
  *   PDC  Previous Day Close      — fair value reference
  *   ONH  Overnight High          — Globex session high (4:15 PM → 9:30 AM ET)
  *   ONL  Overnight Low           — Globex session low
+ *   PMH  Pre-Market High         — 4:00 AM → 9:30 AM ET high (institutional reference)
+ *   PML  Pre-Market Low          — 4:00 AM → 9:30 AM ET low
  *   ORH  Opening Range High      — RTH first-N-minute candle high (default 30 min)
  *   ORL  Opening Range Low       — RTH first-N-minute candle low
  *
@@ -22,10 +24,11 @@ const YahooFinance = require("yahoo-finance2").default;
 const yf    = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
 const logger = require("../utils/logger");
 
-const OR_MINUTES = 30;   // opening range window (changeable)
-const RTH_START  = 570;  // 9:30 AM ET in minutes-since-midnight
-const RTH_END    = 960;  // 4:00 PM ET
-const GLOBEX_END = 975;  // 4:15 PM ET (NQ RTH close)
+const OR_MINUTES   = 30;   // opening range window (changeable)
+const RTH_START    = 570;  // 9:30 AM ET in minutes-since-midnight
+const RTH_END      = 960;  // 4:00 PM ET
+const GLOBEX_END   = 975;  // 4:15 PM ET (NQ RTH close)
+const PREMARKET_START = 240; // 4:00 AM ET — pre-market open
 
 // ── Timezone Helpers ──────────────────────────────────────────────
 
@@ -135,6 +138,27 @@ function calcOvernight(intradayBars) {
   return { ONH, ONL };
 }
 
+/** PMH / PML — Pre-Market session (4:00 AM → 9:30 AM ET). */
+function calcPreMarket(intradayBars) {
+  const today = todayET();
+
+  const pmBars = intradayBars.filter(q => {
+    const et = toET(q.date);
+    return (
+      sameDay(et, today) &&
+      et.totalMinutes >= PREMARKET_START &&
+      et.totalMinutes <  RTH_START
+    );
+  });
+
+  if (!pmBars.length) return { PMH: null, PML: null };
+
+  return {
+    PMH: Math.max(...pmBars.map(q => q.high)),
+    PML: Math.min(...pmBars.map(q => q.low)),
+  };
+}
+
 /** ORH / ORL — Opening Range (first N minutes of RTH). */
 function calcOpeningRange(intradayBars, orMinutes = OR_MINUTES) {
   const today  = todayET();
@@ -226,6 +250,7 @@ async function getKeyLevels(symbol = "NQ=F") {
   // Calculate each level group
   const pd  = calcPreviousDay(dailyBars);
   const on  = calcOvernight(intradayBars);
+  const pm  = calcPreMarket(intradayBars);
   const or  = calcOpeningRange(intradayBars);
 
   const levels = {
@@ -234,6 +259,8 @@ async function getKeyLevels(symbol = "NQ=F") {
     PDC: pd.PDC,
     ONH: on.ONH,
     ONL: on.ONL,
+    PMH: pm.PMH,
+    PML: pm.PML,
     ORH: or.ORH,
     ORL: or.ORL,
   };
@@ -252,13 +279,15 @@ async function getKeyLevels(symbol = "NQ=F") {
     orMinutes:         OR_MINUTES,
     orComplete:        or.orComplete ?? false,
 
-    // ── All 7 Levels ─────────────────────────────────
+    // ── All 9 Levels ─────────────────────────────────
     levels: {
       PDH: pd.PDH,
       PDL: pd.PDL,
       PDC: pd.PDC,
       ONH: on.ONH,
       ONL: on.ONL,
+      PMH: pm.PMH,
+      PML: pm.PML,
       ORH: or.ORH,
       ORL: or.ORL,
     },
@@ -274,6 +303,7 @@ async function getKeyLevels(symbol = "NQ=F") {
     `[levels] ${symbol} @ ${currentPrice} | ` +
     `PDH:${pd.PDH} PDL:${pd.PDL} PDC:${pd.PDC} | ` +
     `ONH:${on.ONH} ONL:${on.ONL} | ` +
+    `PMH:${pm.PMH} PML:${pm.PML} | ` +
     `ORH:${or.ORH} ORL:${or.ORL}`
   );
 

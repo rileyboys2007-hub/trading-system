@@ -34,9 +34,11 @@ const { getMarketInternals }    = require("./internals");
 const { detectLiquiditySweeps } = require("./liquidity");
 const { detectPlaybooks }       = require("./playbooks");
 const { getDailyBias }          = require("./bias");
+const { calculateVWAP }         = require("./vwap");
 const { scoreSignal }           = require("./scoring");
 const { makeDecision }          = require("./decision");
 const { checkPreTrade }         = require("./riskManagement");
+const { getNewsRisk }           = require("../services/newsRisk");
 
 // ── Config ────────────────────────────────────────────────────────
 
@@ -154,6 +156,18 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
 
   logger.info(`[scanner] Scanning ${symbol}...`);
 
+  // ── Step 0: News gate — abort before any expensive calls ─────
+  const newsCheck = await safe("news", () => getNewsRisk());
+  if (newsCheck?.riskLevel === "EXTREME") {
+    logger.info(`[scanner] ⛔ News gate blocked: ${newsCheck.explanation}`);
+    return {
+      triggered: false,
+      reason:    `News gate: ${newsCheck.explanation}`,
+      newsBlocked: true,
+      newsRisk:  newsCheck,
+    };
+  }
+
   // ── Step 1: Collect trigger data for both directions ─────────
   const [
     levels,
@@ -161,12 +175,14 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
     shortSweep,
     longPlaybook,
     shortPlaybook,
+    vwapData,
   ] = await Promise.all([
     safe("levels",         () => getKeyLevels(symbol)),
     safe("sweep:LONG",     () => detectLiquiditySweeps({ direction: "LONG",  symbol })),
     safe("sweep:SHORT",    () => detectLiquiditySweeps({ direction: "SHORT", symbol })),
     safe("playbook:LONG",  () => detectPlaybooks({ direction: "LONG",  symbol })),
     safe("playbook:SHORT", () => detectPlaybooks({ direction: "SHORT", symbol })),
+    safe("vwap",           () => calculateVWAP(symbol)),
   ]);
 
   if (!levels) {
@@ -243,6 +259,8 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
     internals,
     sweep:    activeTriggers.sweep,
     playbook: activeTriggers.playbook,
+    vwap:     vwapData,
+    newsRisk: newsCheck,
   }));
 
   const decision = await safe("decision", () => makeDecision({
@@ -262,6 +280,7 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
   const triggerSummary = [
     activeTriggers.sweep    ? `Sweep: ${activeTriggers.sweep.level} (${activeTriggers.sweep.result})` : null,
     activeTriggers.playbook ? `Playbook: ${activeTriggers.playbook.playbook} (${activeTriggers.playbook.confidence}%)` : null,
+    vwapData ? `VWAP: ${vwapData.position} @ ${vwapData.vwap} (${vwapData.slopeDir})` : null,
   ].filter(Boolean).join(" | ");
 
   logger.info(
@@ -278,8 +297,10 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
     decision,
     riskCheck,
     levels,
+    vwap:          vwapData,
+    newsRisk:      newsCheck,
     triggerSummary,
-    scannedAt:      new Date().toISOString(),
+    scannedAt:     new Date().toISOString(),
 
     // Raw trigger data
     triggers: {

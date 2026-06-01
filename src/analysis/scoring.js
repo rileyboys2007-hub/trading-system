@@ -5,13 +5,14 @@
  * Each factor is scored 0–100, weighted, then summed into a composite score.
  *
  * Factors and weights:
- *   Daily Bias Alignment    20%  — does bias support the trade direction?
- *   Internals Alignment     20%  — do QQQ/NVDA/MSFT/AAPL support the direction?
- *   Playbook Quality        20%  — is there a matched playbook for this setup?
- *   Liquidity Sweep Quality 15%  — was there a clean sweep supporting the trade?
- *   Session Quality         12%  — is this a high-probability time of day?
- *   Volume                  8%   — is the move volume-confirmed?
- *   News Risk               5%   — is there a news event nearby?
+ *   Daily Bias Alignment    18%  — does bias support the trade direction?
+ *   Internals Alignment     17%  — do QQQ/NVDA/MSFT/AAPL support the direction?
+ *   Playbook Quality        18%  — is there a matched playbook for this setup?
+ *   Liquidity Sweep Quality 13%  — was there a clean sweep supporting the trade?
+ *   Session Quality         11%  — is this a high-probability time of day?
+ *   VWAP Position           12%  — is price above/below VWAP, and is VWAP sloping your way?
+ *   Volume                  7%   — is the move volume-confirmed?
+ *   News Risk               4%   — is there a news event nearby?
  *
  * Grade thresholds:
  *   A+  90–100   Elite setup — everything aligned, take maximum size
@@ -28,6 +29,7 @@ const { getMarketInternals }    = require("./internals");
 const { detectLiquiditySweeps } = require("./liquidity");
 const { detectPlaybooks }       = require("./playbooks");
 const { getNewsRisk }           = require("../services/newsRisk");
+const { calculateVWAP }         = require("./vwap");
 
 // ── Grade Map ─────────────────────────────────────────────────────
 
@@ -201,7 +203,68 @@ function scoreNewsRisk(newsRiskResult) {
 }
 
 /**
- * 6. Liquidity Sweep Quality (weight: 15%)
+ * 6. VWAP Position (weight: 12%)
+ * Scores whether price is on the right side of VWAP for the trade direction,
+ * and whether VWAP slope supports the direction.
+ *
+ * Key insight: trading WITH VWAP direction = institutional flow alignment.
+ * Being extended FAR from VWAP = mean-reversion risk, lower score.
+ */
+function scoreVWAP(vwapResult, direction) {
+  if (!vwapResult) return { score: 50, explanation: "VWAP unavailable (market likely closed) — neutral score" };
+
+  const { aboveVWAP, position, slopeDir, distancePts, vwap, currentPrice } = vwapResult;
+  const isLong = direction === "LONG";
+
+  let score;
+  let status;
+
+  if (position === "AT") {
+    // Price at VWAP — potential bounce zone, good for both directions
+    score  = slopeDir === (isLong ? "RISING" : "FALLING") ? 82 : 72;
+    status = `At VWAP (${vwap}) — potential ${direction === "LONG" ? "support" : "resistance"} bounce`;
+  } else if (isLong && aboveVWAP) {
+    // LONG trade, price above VWAP — institutional bullish bias confirmed
+    if (position === "FAR_ABOVE") {
+      score  = 52; // Extended — mean-reversion risk
+      status = `Extended ${distancePts} pts above VWAP — overextended, mean-reversion risk`;
+    } else {
+      score  = slopeDir === "RISING" ? 88 : slopeDir === "FLAT" ? 72 : 60;
+      status = `Above VWAP (${distancePts} pts) | VWAP ${slopeDir}`;
+    }
+  } else if (!isLong && !aboveVWAP) {
+    // SHORT trade, price below VWAP — institutional bearish bias confirmed
+    if (position === "FAR_BELOW") {
+      score  = 52; // Extended
+      status = `Extended ${distancePts} pts below VWAP — overextended, mean-reversion risk`;
+    } else {
+      score  = slopeDir === "FALLING" ? 88 : slopeDir === "FLAT" ? 72 : 60;
+      status = `Below VWAP (${distancePts} pts) | VWAP ${slopeDir}`;
+    }
+  } else if (isLong && !aboveVWAP) {
+    // LONG trade, price BELOW VWAP — fighting institutional bearish flow
+    score  = slopeDir === "RISING" ? 42 : slopeDir === "FLAT" ? 30 : 15;
+    status = `Below VWAP — fighting bearish institutional flow | VWAP ${slopeDir}`;
+  } else {
+    // SHORT trade, price ABOVE VWAP — fighting institutional bullish flow
+    score  = slopeDir === "FALLING" ? 42 : slopeDir === "FLAT" ? 30 : 15;
+    status = `Above VWAP — fighting bullish institutional flow | VWAP ${slopeDir}`;
+  }
+
+  return {
+    score,
+    vwap,
+    currentPrice,
+    position,
+    slopeDir,
+    distancePts,
+    aboveVWAP,
+    explanation: `${status} (VWAP: ${vwap}, Price: ${currentPrice})`,
+  };
+}
+
+/**
+ * 7. Liquidity Sweep Quality (weight: 13%)
  * A clean rejection sweep in the trade direction is high quality.
  */
 function scoreLiquiditySweep(sweepResult, direction) {
@@ -326,13 +389,14 @@ function buildSummary(factors, grade, totalScore) {
 // ── Main Export ───────────────────────────────────────────────────
 
 const FACTOR_WEIGHTS = {
-  dailyBias:      0.20,
-  internals:      0.20,
-  playbookQuality:0.20,
-  liquiditySweep: 0.15,
-  sessionQuality: 0.12,
-  volume:         0.08,
-  newsRisk:       0.05,
+  dailyBias:      0.18,
+  internals:      0.17,
+  playbookQuality:0.18,
+  liquiditySweep: 0.13,
+  sessionQuality: 0.11,
+  vwap:           0.12,
+  volume:         0.07,
+  newsRisk:       0.04,
 };
 
 /**
@@ -356,12 +420,13 @@ async function scoreSignal(opts = {}) {
   // Fetch any missing data in parallel — each wrapped so one failure doesn't kill the rest
   const safe = fn => fn.catch(e => { logger.warn(`[scoring] Module failed: ${e.message}`); return null; });
 
-  const [bias, internals, sweep, playbook, newsRiskData] = await Promise.all([
+  const [bias, internals, sweep, playbook, newsRiskData, vwapData] = await Promise.all([
     opts.bias      != null ? opts.bias      : safe(getDailyBias()),
     opts.internals != null ? opts.internals : safe(getMarketInternals()),
     opts.sweep     != null ? opts.sweep     : safe(detectLiquiditySweeps({ symbol })),
     opts.playbook  != null ? opts.playbook  : safe(detectPlaybooks(symbol)),
     opts.newsRisk  != null ? opts.newsRisk  : safe(getNewsRisk()),
+    opts.vwap      != null ? opts.vwap      : safe(calculateVWAP(symbol)),
   ]);
 
   // Score each factor
@@ -371,6 +436,7 @@ async function scoreSignal(opts = {}) {
     playbookQuality: scorePlaybookQuality(playbook, direction),
     liquiditySweep:  scoreLiquiditySweep(sweep, direction),
     sessionQuality:  scoreSessionQuality(),
+    vwap:            scoreVWAP(vwapData, direction),
     volume:          scoreVolume(internals),
     newsRisk:        scoreNewsRisk(newsRiskData),
   };

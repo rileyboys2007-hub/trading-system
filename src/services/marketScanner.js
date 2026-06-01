@@ -52,7 +52,7 @@ function dirColor(direction, decision) {
 // ── Discord Builder ───────────────────────────────────────────────
 
 async function sendAlert(result) {
-  const { direction, signal, scoreResult, decision, riskCheck, levels, triggerSummary } = result;
+  const { direction, signal, scoreResult, decision, riskCheck, levels, vwap, triggerSummary } = result;
   const dec     = decision.decision;
   const emoji   = decisionEmoji(dec);
   const color   = dirColor(direction, dec);
@@ -91,6 +91,11 @@ async function sendAlert(result) {
       value:  triggerSummary || "—",
       inline: false,
     },
+    ...(vwap ? [{
+      name:   "📈 VWAP",
+      value:  `${vwap.vwap} | ${vwap.position} by ${vwap.distancePts} pts | Slope: ${vwap.slopeDir}`,
+      inline: false,
+    }] : []),
   ];
 
   if (decision.reasons?.for?.length > 0) {
