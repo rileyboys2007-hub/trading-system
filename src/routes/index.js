@@ -19,6 +19,7 @@ const riskRoutes       = require("./riskManagement");
 const eodRoutes        = require("./eodReview");
 const scannerRoutes    = require("./scanner");
 const vwapRoutes       = require("./vwap");
+const tradesRoutes     = require("./trades");
 
 // Health check
 router.get("/health", (_req, res) => {
@@ -39,5 +40,6 @@ router.use("/risk",             riskRoutes);
 router.use("/eod",              eodRoutes);
 router.use("/scanner",          scannerRoutes);
 router.use("/vwap",             vwapRoutes);
+router.use("/trades",           tradesRoutes);
 
 module.exports = router;

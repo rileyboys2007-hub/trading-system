@@ -11,6 +11,7 @@
 const logger        = require("../utils/logger");
 const discord       = require("./discordService");
 const { runScan, isRTH } = require("../analysis/scanner");
+const tradeTracker  = require("./tradeTracker");
 
 // ── Config ────────────────────────────────────────────────────────
 
@@ -141,9 +142,80 @@ async function sendAlert(result) {
     });
   }
 
+  // Append running win rate to every alert
+  fields.push({
+    name:   "📈 Win Rate",
+    value:  tradeTracker.recordLine(),
+    inline: false,
+  });
+
   await discord.send(title, description, color, fields);
   alertCount++;
   logger.info(`[marketScanner] Discord alert sent: ${dec} ${direction} | total alerts today: ${alertCount}`);
+
+  // Record trade for outcome tracking
+  try {
+    tradeTracker.recordTrade(signal, result.decision, result.scoreResult);
+  } catch (err) {
+    logger.warn(`[marketScanner] Trade tracker record failed: ${err.message}`);
+  }
+}
+
+// ── Outcome Discord Notifications ─────────────────────────────────
+
+async function notifyOutcome(update) {
+  const { trade, event } = update;
+  const stats = tradeTracker.getStats().summary;
+  const record = tradeTracker.recordLine();
+
+  let title, color, pnlStr;
+
+  const pnl = trade.pnlPoints;
+  pnlStr = pnl != null ? `${pnl >= 0 ? "+" : ""}${pnl} pts` : "—";
+
+  if (event === "TP2_HIT") {
+    title = `✅ FULL WIN — ${trade.symbol} ${trade.direction} | ${pnlStr}`;
+    color = "long";
+  } else if (event === "TP1_HIT") {
+    title = `🟡 TP1 HIT — ${trade.symbol} ${trade.direction} | Still running to TP2...`;
+    color = trade.direction === "LONG" ? "long" : "short";
+  } else if (event === "SL_HIT") {
+    title = `🔴 STOPPED OUT — ${trade.symbol} ${trade.direction} | ${pnlStr}`;
+    color = "warning";
+  } else if (event === "SL_HIT_AFTER_TP1") {
+    title = `🟡 PARTIAL WIN — ${trade.symbol} ${trade.direction} | TP1 banked | ${pnlStr}`;
+    color = trade.direction === "LONG" ? "long" : "short";
+  } else if (event === "EXPIRED") {
+    title = `⏰ TRADE EXPIRED — ${trade.symbol} ${trade.direction} | No resolution in 48h`;
+    color = "info";
+  } else {
+    return;  // unknown event
+  }
+
+  const fields = [
+    {
+      name:   "📐 Entry → Levels",
+      value:  `Entry: **${trade.entry}** | SL: ${trade.sl} | TP1: ${trade.tp1} | TP2: ${trade.tp2}`,
+      inline: false,
+    },
+    {
+      name:   "📊 Trade Details",
+      value:  `${trade.decision} | Score: ${trade.score ?? "N/A"}/100 | Risk: ${trade.slPoints} pts`,
+      inline: true,
+    },
+    {
+      name:   "💰 P&L",
+      value:  pnlStr,
+      inline: true,
+    },
+    {
+      name:   "📈 Running Record",
+      value:  record,
+      inline: false,
+    },
+  ];
+
+  await discord.send(title, `Opened: ${new Date(trade.openedAt).toLocaleTimeString("en-US", { timeZone: "America/Los_Angeles", hour: "2-digit", minute: "2-digit" })} PT`, color, fields);
 }
 
 // ── Main Tick ────────────────────────────────────────────────────
@@ -158,16 +230,48 @@ async function tick() {
   lastScanAt = new Date().toISOString();
 
   try {
+    // ── 1. Check outcomes on open trades first ──────────────────
+    const currentPrice = lastScanResult?.levels?.currentPrice ?? null;
+    if (currentPrice) {
+      const updates = tradeTracker.updateOutcomes({ price: currentPrice });
+      for (const update of updates) {
+        await notifyOutcome(update).catch(err =>
+          logger.warn(`[marketScanner] Outcome notify failed: ${err.message}`)
+        );
+      }
+    }
+
+    // ── 2. Run next scan ────────────────────────────────────────
     const result = await runScan(SYMBOL);
     lastScanResult = result;
 
     if (!result.triggered) {
       logger.info(`[marketScanner] Scan #${scanCount}: no trigger — ${result.reason}`);
+
+      // Still check outcomes with the fresh price from levels
+      if (result.levels?.currentPrice) {
+        const updates = tradeTracker.updateOutcomes({ price: result.levels.currentPrice });
+        for (const update of updates) {
+          await notifyOutcome(update).catch(err =>
+            logger.warn(`[marketScanner] Outcome notify failed: ${err.message}`)
+          );
+        }
+      }
       return;
     }
 
     const dec = result.decision?.decision;
     logger.info(`[marketScanner] Scan #${scanCount}: ${result.direction} | ${dec} | Score: ${result.scoreResult?.totalScore}`);
+
+    // Check outcomes with precise fresh price before sending new alert
+    if (result.levels?.currentPrice) {
+      const updates = tradeTracker.updateOutcomes({ price: result.levels.currentPrice });
+      for (const update of updates) {
+        await notifyOutcome(update).catch(err =>
+          logger.warn(`[marketScanner] Outcome notify failed: ${err.message}`)
+        );
+      }
+    }
 
     // Only alert on TAKE or STRONG TAKE
     if (!["TAKE", "STRONG TAKE"].includes(dec)) {
@@ -183,7 +287,7 @@ async function tick() {
       return;
     }
 
-    // Send alert and mark cooldown
+    // Send alert and mark cooldown (recordTrade is called inside sendAlert)
     await sendAlert(result);
     cooldowns.set(key, Date.now());
 
