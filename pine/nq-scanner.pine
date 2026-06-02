@@ -1,0 +1,538 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// NQ Trading System — Sweep & Playbook Scanner  v1.0
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Mirrors the Node.js backend logic exactly:
+//   • 8 Sweep signals  (PDH/PDL/ONH/ONL/ORH/ORL/PMH/PML rejections)
+//   • 8 Playbook signals (ORB ×2, Sweep Reversal ×4, Trend Pullback ×2)
+//   • ATR-based SL (14-period × 2.0, clamped 14–55 pts)
+//   • Sends structured JSON webhooks to your VPS on every bar close
+//
+// SETUP (takes ~3 minutes):
+//   1. Open TradingView → add this indicator to NQ1! on the 5-minute chart
+//   2. Fill in your Webhook Secret in the indicator settings (same value as
+//      WEBHOOK_SECRET in your VPS .env file)
+//   3. Create ONE alert on this indicator:
+//        Condition: "NQ Scanner" → "Any alert() function call"
+//        Alert name: "NQ Scanner → VPS"
+//        Webhook URL: http://187.124.235.75:3000/webhook
+//        Message: (leave blank — the script fills this dynamically)
+//   4. Done. Every setup that fires will send a JSON payload to your VPS,
+//      which runs full scoring, decision, and Discord alert.
+//
+// WEBHOOK PAYLOAD SHAPE (matches routes/webhook.js):
+//   { "secret":"...", "symbol":"NQ=F", "timeframe":"5",
+//     "setup":"PDH_SWEEP_REVERSAL_SHORT",
+//     "entry":30450.25, "sl":30475.00, "tp1":30413.00, "tp2":30375.75,
+//     "notes":"PDH swept 3.5pts, rej=85%" }
+//
+// ═══════════════════════════════════════════════════════════════════════════
+//@version=5
+indicator("NQ Trading System — Sweep & Playbook Scanner",
+     overlay            = true,
+     max_labels_count   = 500,
+     max_lines_count    = 200,
+     max_bars_back      = 500)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+string  i_secret    = input.string ("CHANGE_ME",  "Webhook Secret",
+     tooltip = "Must match WEBHOOK_SECRET in your VPS .env file")
+string  i_symbol    = input.string ("NQ=F",        "Symbol for payload",
+     tooltip = "How this symbol is stored in your backend (Yahoo Finance format)")
+
+int     i_atr_len   = input.int   (14,   "ATR Period",       minval=5, maxval=50, group="Risk")
+float   i_atr_mult  = input.float (2.0,  "ATR × SL",        minval=1.0, maxval=4.0, step=0.5, group="Risk")
+int     i_sl_floor  = input.int   (14,   "SL Floor (pts)",   minval=5,  maxval=30,  group="Risk")
+int     i_sl_cap    = input.int   (55,   "SL Cap (pts)",     minval=30, maxval=120, group="Risk")
+float   i_min_sweep = input.float (1.0,  "Min Sweep (pts)",  minval=0.25, step=0.25, group="Sweeps",
+     tooltip="Minimum wick past the level to qualify as a sweep")
+float   i_min_rej   = input.float (0.30, "Min Rejection Strength (0–1)", minval=0.1, maxval=0.9, step=0.05,
+     group="Sweeps", tooltip="How strongly price must snap back (0=any, 1=full snap)")
+
+bool    i_rth_only  = input.bool  (true,  "RTH alerts only (9:30–4:00 PM ET)", group="Filters")
+bool    i_show_lvl  = input.bool  (true,  "Show Key Levels", group="Display")
+bool    i_show_lbl  = input.bool  (true,  "Show Signal Labels", group="Display")
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── SESSION DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+bool is_rth        = not na(time(timeframe.period, "0930-1600", "America/New_York"))
+bool is_or_window  = not na(time(timeframe.period, "0930-1000", "America/New_York"))
+bool is_premarket  = not na(time(timeframe.period, "0400-0930", "America/New_York"))
+bool rth_just_open = is_rth and not nz(is_rth[1], false)
+bool new_day       = ta.change(time("D")) != 0
+
+// Gate: send alerts only during RTH if the filter is on
+bool in_session = not i_rth_only or is_rth
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── KEY LEVELS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Previous Day (from daily bar[1] — confirmed, no lookahead bias) ───────
+float pdh = request.security(syminfo.tickerid, "D", high[1],  lookahead=barmerge.lookahead_on)
+float pdl = request.security(syminfo.tickerid, "D", low[1],   lookahead=barmerge.lookahead_on)
+float pdc = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+
+// ── Opening Range (9:30–10:00 AM ET) — built bar by bar ──────────────────
+var float _orh = na
+var float _orl = na
+var bool  or_ready = false
+
+if new_day
+    _orh     := na
+    _orl     := na
+    or_ready := false
+
+if is_or_window
+    _orh := na(_orh) ? high : math.max(_orh, high)
+    _orl := na(_orl) ? low  : math.min(_orl, low)
+else if is_rth and not na(_orh) and not or_ready
+    or_ready := true
+
+float orh = _orh
+float orl = _orl
+
+// ── Pre-Market (4:00–9:30 AM ET) ─────────────────────────────────────────
+var float _pmh_build = na
+var float _pml_build = na
+var float pmh = na
+var float pml = na
+
+if new_day
+    _pmh_build := na
+    _pml_build := na
+
+if is_premarket
+    _pmh_build := na(_pmh_build) ? high : math.max(_pmh_build, high)
+    _pml_build := na(_pml_build) ? low  : math.min(_pml_build, low)
+
+if rth_just_open and not na(_pmh_build)
+    pmh := _pmh_build
+    pml := _pml_build
+
+// ── Overnight / Globex (4:00 PM ET prev → 9:30 AM ET today) ─────────────
+var float _onh_build = na
+var float _onl_build = na
+var float onh = na
+var float onl = na
+
+// Accumulate when outside RTH
+if not is_rth
+    _onh_build := na(_onh_build) ? high : math.max(_onh_build, high)
+    _onl_build := na(_onl_build) ? low  : math.min(_onl_build, low)
+
+// Lock at RTH open; reset builders for tonight
+if rth_just_open
+    if not na(_onh_build)
+        onh := _onh_build
+        onl := _onl_build
+    _onh_build := na
+    _onl_build := na
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── ATR — DYNAMIC SL SIZING  (mirrors atr.js: 14-period × 2.0)
+// ═══════════════════════════════════════════════════════════════════════════
+
+float atr_raw = ta.atr(i_atr_len)
+float atr_sl  = math.max(i_sl_floor, math.min(i_sl_cap, math.round(atr_raw * i_atr_mult)))
+// Small buffer added to swept-level SL (prevents SL sitting exactly on the level)
+float level_buffer = math.max(4, math.round(atr_raw * 0.4))
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Rejection strength: how cleanly did price snap back after sweeping a level?
+//   HIGH sweep:  wick = high - level  |  snap = level - close
+//   LOW  sweep:  wick = level - low   |  snap = close - level
+f_rej_h(lv) => (high - lv) > 0 ? math.min(1.0, (lv - close)       / (high - lv)) : 0.0
+f_rej_l(lv) => (lv - low)  > 0 ? math.min(1.0, (close - lv)       / (lv - low))  : 0.0
+
+// Build the JSON webhook payload (matches routes/webhook.js exactly)
+f_json(setup, entry, sl, tp1, tp2, notes) =>
+    str.format(
+        '{{"secret":"{0}","symbol":"{1}","timeframe":"{2}","setup":"{3}","entry":{4},"sl":{5},"tp1":{6},"tp2":{7},"notes":"{8}"}}',
+        i_secret, i_symbol, timeframe.period, setup,
+        str.tostring(math.round(entry, 2)),
+        str.tostring(math.round(sl,    2)),
+        str.tostring(math.round(tp1,   2)),
+        str.tostring(math.round(tp2,   2)),
+        notes)
+
+// TP from SL distance
+f_tp1_long (entry, sl) => entry + math.abs(entry - sl) * 1.5
+f_tp2_long (entry, sl) => entry + math.abs(entry - sl) * 3.0
+f_tp1_short(entry, sl) => entry - math.abs(sl - entry) * 1.5
+f_tp2_short(entry, sl) => entry - math.abs(sl - entry) * 3.0
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── SWEEP DETECTION
+// ═══════════════════════════════════════════════════════════════════════════
+// Rules (mirror liquidity.js):
+//   HIGH sweep REJECTED → SHORT signal: high > level + min_sweep AND close < level
+//   LOW  sweep REJECTED → LONG  signal: low  < level - min_sweep AND close > level
+// Only fire on a confirmed closed bar (barstate.isconfirmed)
+
+// ── PDH — SHORT ──────────────────────────────────────────────────────────
+bool pdh_ok        = not na(pdh)
+bool pdh_swept     = pdh_ok and (high - pdh) >= i_min_sweep
+bool pdh_rejected  = pdh_swept and close < pdh
+float pdh_rej      = pdh_swept ? f_rej_h(pdh) : 0.0
+bool sig_pdh_short = pdh_rejected and pdh_rej >= i_min_rej and barstate.isconfirmed and in_session
+
+// ── PDL — LONG ───────────────────────────────────────────────────────────
+bool pdl_ok        = not na(pdl)
+bool pdl_swept     = pdl_ok and (pdl - low) >= i_min_sweep
+bool pdl_rejected  = pdl_swept and close > pdl
+float pdl_rej      = pdl_swept ? f_rej_l(pdl) : 0.0
+bool sig_pdl_long  = pdl_rejected and pdl_rej >= i_min_rej and barstate.isconfirmed and in_session
+
+// ── ONH — SHORT ──────────────────────────────────────────────────────────
+bool onh_ok        = not na(onh)
+bool onh_swept     = onh_ok and (high - onh) >= i_min_sweep
+bool onh_rejected  = onh_swept and close < onh
+float onh_rej      = onh_swept ? f_rej_h(onh) : 0.0
+bool sig_onh_short = onh_rejected and onh_rej >= i_min_rej and barstate.isconfirmed and in_session
+
+// ── ONL — LONG ───────────────────────────────────────────────────────────
+bool onl_ok        = not na(onl)
+bool onl_swept     = onl_ok and (onl - low) >= i_min_sweep
+bool onl_rejected  = onl_swept and close > onl
+float onl_rej      = onl_swept ? f_rej_l(onl) : 0.0
+bool sig_onl_long  = onl_rejected and onl_rej >= i_min_rej and barstate.isconfirmed and in_session
+
+// ── ORH — SHORT (OR must be complete) ────────────────────────────────────
+bool orh_ok        = not na(orh) and or_ready
+bool orh_swept     = orh_ok and (high - orh) >= i_min_sweep
+bool orh_rejected  = orh_swept and close < orh
+float orh_rej      = orh_swept ? f_rej_h(orh) : 0.0
+bool sig_orh_short = orh_rejected and orh_rej >= i_min_rej and barstate.isconfirmed and in_session
+
+// ── ORL — LONG (OR must be complete) ─────────────────────────────────────
+bool orl_ok        = not na(orl) and or_ready
+bool orl_swept     = orl_ok and (orl - low) >= i_min_sweep
+bool orl_rejected  = orl_swept and close > orl
+float orl_rej      = orl_swept ? f_rej_l(orl) : 0.0
+bool sig_orl_long  = orl_rejected and orl_rej >= i_min_rej and barstate.isconfirmed and in_session
+
+// ── PMH — SHORT ──────────────────────────────────────────────────────────
+bool pmh_ok        = not na(pmh)
+bool pmh_swept     = pmh_ok and (high - pmh) >= i_min_sweep
+bool pmh_rejected  = pmh_swept and close < pmh
+float pmh_rej      = pmh_swept ? f_rej_h(pmh) : 0.0
+bool sig_pmh_short = pmh_rejected and pmh_rej >= i_min_rej and barstate.isconfirmed and in_session
+
+// ── PML — LONG ───────────────────────────────────────────────────────────
+bool pml_ok        = not na(pml)
+bool pml_swept     = pml_ok and (pml - low) >= i_min_sweep
+bool pml_rejected  = pml_swept and close > pml
+float pml_rej      = pml_swept ? f_rej_l(pml) : 0.0
+bool sig_pml_long  = pml_rejected and pml_rej >= i_min_rej and barstate.isconfirmed and in_session
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── PLAYBOOK DETECTION  (mirrors playbooks.js — 55% weighted score gate)
+// ═══════════════════════════════════════════════════════════════════════════
+
+float avg_vol = ta.sma(volume, 30)
+float vol_ratio = avg_vol > 0 ? volume / avg_vol : 1.0
+
+// ── Trend helper: compare first-half vs second-half avg over last 16 bars ─
+// Mirrors the detectTrend() function in playbooks.js (diff > 5 = BULLISH etc.)
+float half1_avg = math.avg(close[15], close[14], close[13], close[12], close[11], close[10], close[9], close[8])
+float half2_avg = math.avg(close[7],  close[6],  close[5],  close[4],  close[3],  close[2],  close[1],  close)
+float trend_diff = half2_avg - half1_avg
+bool trend_bull = trend_diff > 5
+bool trend_bear = trend_diff < -5
+
+// ── 1. Bullish ORB (LONG) ─────────────────────────────────────────────────
+// Mirror: detectBullishORB — weights 40+20+15+15+10=100, threshold 55
+float orb_l_score = (or_ready and not na(orh) and close > orh             ? 40 : 0)
+                  + (close > open                                           ? 20 : 0)
+                  + (not na(orh) and close > orh + 5                       ? 15 : 0)
+                  + (not na(orh) and close[1] <= orh and close[2] <= orh   ? 15 : 0)
+                  + (vol_ratio >= 1.0                                       ? 10 : 0)
+bool sig_orb_long = orb_l_score >= 55 and barstate.isconfirmed and in_session
+
+// ── 2. Bearish ORB (SHORT) ────────────────────────────────────────────────
+float orb_s_score = (or_ready and not na(orl) and close < orl             ? 40 : 0)
+                  + (close < open                                           ? 20 : 0)
+                  + (not na(orl) and close < orl - 5                       ? 15 : 0)
+                  + (not na(orl) and close[1] >= orl and close[2] >= orl   ? 15 : 0)
+                  + (vol_ratio >= 1.0                                       ? 10 : 0)
+bool sig_orb_short = orb_s_score >= 55 and barstate.isconfirmed and in_session
+
+// ── 3. PDL Sweep Reversal is already covered by sig_pdl_long above ────────
+//    (playbooks.js #3 uses the same sweep+rejection logic)
+
+// ── 4. PDH Sweep Reversal is already covered by sig_pdh_short above ───────
+
+// ── 5. ONH Breakout Continuation (LONG) ──────────────────────────────────
+// Mirror: detectONHBreakout — weights 30+25+25+20=100, threshold 55
+float onh_brk_score = (not na(onh) and close > onh                         ? 30 : 0)
+                    + (not na(pdh) and close > pdh                          ? 25 : 0)
+                    + (not na(onh) and close[1] > onh                       ? 25 : 0)
+                    + (close > open                                          ? 20 : 0)
+bool sig_onh_break_long = onh_brk_score >= 55 and barstate.isconfirmed and in_session
+
+// ── 6. ONL Breakdown Continuation (SHORT) ─────────────────────────────────
+float onl_brk_score = (not na(onl) and close < onl                         ? 30 : 0)
+                    + (not na(pdl) and close < pdl                          ? 25 : 0)
+                    + (not na(onl) and close[1] < onl                       ? 25 : 0)
+                    + (close < open                                          ? 20 : 0)
+bool sig_onl_break_short = onl_brk_score >= 55 and barstate.isconfirmed and in_session
+
+// ── 7. Bullish Trend Pullback (LONG) ─────────────────────────────────────
+// Mirror: detectBullishPullback — weights 30+25+25+10+10=100, threshold 55
+float rec_hi5   = math.max(high, math.max(high[1], math.max(high[2], math.max(high[3], high[4]))))
+float rec_lo5   = math.min(low,  math.min(low[1],  math.min(low[2],  math.min(low[3],  low[4]))))
+float rec_range = rec_hi5 - rec_lo5
+bool at_support = (not na(onl) and math.abs(low - onl) <= 15) or
+                  (not na(orl) and math.abs(low - orl) <= 15) or
+                  (not na(pdc) and math.abs(low - pdc) <= 15)
+float btp_score = (trend_bull                                               ? 30 : 0)
+                + (close < rec_hi5 - 10                                     ? 25 : 0)
+                + (close > open                                              ? 25 : 0)
+                + (rec_range > 0 and (rec_hi5 - close) / rec_range < 0.6   ? 10 : 0)
+                + (at_support                                                ? 10 : 0)
+bool sig_bull_pullback = btp_score >= 55 and barstate.isconfirmed and in_session
+
+// ── 8. Bearish Trend Pullback (SHORT) ─────────────────────────────────────
+bool at_resist = (not na(onh) and math.abs(high - onh) <= 15) or
+                 (not na(orh) and math.abs(high - orh) <= 15) or
+                 (not na(pdc) and math.abs(high - pdc) <= 15)
+float betp_score = (trend_bear                                              ? 30 : 0)
+                 + (close > rec_lo5 + 10                                    ? 25 : 0)
+                 + (close < open                                             ? 25 : 0)
+                 + (rec_range > 0 and (close - rec_lo5) / rec_range < 0.6  ? 10 : 0)
+                 + (at_resist                                                ? 10 : 0)
+bool sig_bear_pullback = betp_score >= 55 and barstate.isconfirmed and in_session
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── WEBHOOK ALERTS  (dynamic JSON payload via alert())
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// TradingView sends the alert() payload to the webhook URL.
+// Create ONE alert: Condition → "Any alert() function call"
+// Webhook URL: http://187.124.235.75:3000/webhook
+//
+// SL placement:
+//   Sweep signals → SL anchored to the swept level + small buffer
+//   Playbook signals → ATR-based SL distance
+
+// ── Sweep: PDH SHORT ─────────────────────────────────────────────────────
+if sig_pdh_short
+    _sl  = pdh + level_buffer
+    _tp1 = f_tp1_short(close, _sl)
+    _tp2 = f_tp2_short(close, _sl)
+    alert(f_json("PDH_SWEEP_REVERSAL_SHORT", close, _sl, _tp1, _tp2,
+         "PDH swept " + str.tostring(math.round(high - pdh, 1)) + "pts rej=" + str.tostring(math.round(pdh_rej * 100)) + "%"),
+         alert.freq_once_per_bar_close)
+
+// ── Sweep: PDL LONG ──────────────────────────────────────────────────────
+if sig_pdl_long
+    _sl  = pdl - level_buffer
+    _tp1 = f_tp1_long(close, _sl)
+    _tp2 = f_tp2_long(close, _sl)
+    alert(f_json("PDL_SWEEP_REVERSAL_LONG", close, _sl, _tp1, _tp2,
+         "PDL swept " + str.tostring(math.round(pdl - low, 1)) + "pts rej=" + str.tostring(math.round(pdl_rej * 100)) + "%"),
+         alert.freq_once_per_bar_close)
+
+// ── Sweep: ONH SHORT ─────────────────────────────────────────────────────
+if sig_onh_short
+    _sl  = onh + level_buffer
+    _tp1 = f_tp1_short(close, _sl)
+    _tp2 = f_tp2_short(close, _sl)
+    alert(f_json("ONH_SWEEP_REVERSAL_SHORT", close, _sl, _tp1, _tp2,
+         "ONH swept " + str.tostring(math.round(high - onh, 1)) + "pts rej=" + str.tostring(math.round(onh_rej * 100)) + "%"),
+         alert.freq_once_per_bar_close)
+
+// ── Sweep: ONL LONG ──────────────────────────────────────────────────────
+if sig_onl_long
+    _sl  = onl - level_buffer
+    _tp1 = f_tp1_long(close, _sl)
+    _tp2 = f_tp2_long(close, _sl)
+    alert(f_json("ONL_SWEEP_REVERSAL_LONG", close, _sl, _tp1, _tp2,
+         "ONL swept " + str.tostring(math.round(onl - low, 1)) + "pts rej=" + str.tostring(math.round(onl_rej * 100)) + "%"),
+         alert.freq_once_per_bar_close)
+
+// ── Sweep: ORH SHORT ─────────────────────────────────────────────────────
+if sig_orh_short
+    _sl  = orh + level_buffer
+    _tp1 = f_tp1_short(close, _sl)
+    _tp2 = f_tp2_short(close, _sl)
+    alert(f_json("ORH_SWEEP_REVERSAL_SHORT", close, _sl, _tp1, _tp2,
+         "ORH swept " + str.tostring(math.round(high - orh, 1)) + "pts rej=" + str.tostring(math.round(orh_rej * 100)) + "%"),
+         alert.freq_once_per_bar_close)
+
+// ── Sweep: ORL LONG ──────────────────────────────────────────────────────
+if sig_orl_long
+    _sl  = orl - level_buffer
+    _tp1 = f_tp1_long(close, _sl)
+    _tp2 = f_tp2_long(close, _sl)
+    alert(f_json("ORL_SWEEP_REVERSAL_LONG", close, _sl, _tp1, _tp2,
+         "ORL swept " + str.tostring(math.round(orl - low, 1)) + "pts rej=" + str.tostring(math.round(orl_rej * 100)) + "%"),
+         alert.freq_once_per_bar_close)
+
+// ── Sweep: PMH SHORT ─────────────────────────────────────────────────────
+if sig_pmh_short
+    _sl  = pmh + level_buffer
+    _tp1 = f_tp1_short(close, _sl)
+    _tp2 = f_tp2_short(close, _sl)
+    alert(f_json("PMH_SWEEP_REVERSAL_SHORT", close, _sl, _tp1, _tp2,
+         "PMH swept " + str.tostring(math.round(high - pmh, 1)) + "pts rej=" + str.tostring(math.round(pmh_rej * 100)) + "%"),
+         alert.freq_once_per_bar_close)
+
+// ── Sweep: PML LONG ──────────────────────────────────────────────────────
+if sig_pml_long
+    _sl  = pml - level_buffer
+    _tp1 = f_tp1_long(close, _sl)
+    _tp2 = f_tp2_long(close, _sl)
+    alert(f_json("PML_SWEEP_REVERSAL_LONG", close, _sl, _tp1, _tp2,
+         "PML swept " + str.tostring(math.round(pml - low, 1)) + "pts rej=" + str.tostring(math.round(pml_rej * 100)) + "%"),
+         alert.freq_once_per_bar_close)
+
+// ── Playbook: Bullish ORB LONG ────────────────────────────────────────────
+if sig_orb_long
+    _sl  = (not na(orl) ? orl : close) - atr_sl
+    _tp1 = f_tp1_long(close, _sl)
+    _tp2 = f_tp2_long(close, _sl)
+    alert(f_json("BULLISH_ORB_LONG", close, _sl, _tp1, _tp2,
+         "ORB break " + str.tostring(math.round(close - orh, 1)) + "pts above ORH | vol=" + str.tostring(math.round(vol_ratio, 1)) + "x | score=" + str.tostring(orb_l_score)),
+         alert.freq_once_per_bar_close)
+
+// ── Playbook: Bearish ORB SHORT ───────────────────────────────────────────
+if sig_orb_short
+    _sl  = (not na(orh) ? orh : close) + atr_sl
+    _tp1 = f_tp1_short(close, _sl)
+    _tp2 = f_tp2_short(close, _sl)
+    alert(f_json("BEARISH_ORB_SHORT", close, _sl, _tp1, _tp2,
+         "ORB break " + str.tostring(math.round(orl - close, 1)) + "pts below ORL | vol=" + str.tostring(math.round(vol_ratio, 1)) + "x | score=" + str.tostring(orb_s_score)),
+         alert.freq_once_per_bar_close)
+
+// ── Playbook: ONH Breakout LONG ───────────────────────────────────────────
+if sig_onh_break_long
+    _sl  = (not na(onh) ? onh : close) - atr_sl
+    _tp1 = f_tp1_long(close, _sl)
+    _tp2 = f_tp2_long(close, _sl)
+    alert(f_json("ONH_BREAKOUT_CONTINUATION_LONG", close, _sl, _tp1, _tp2,
+         "ONH breakout " + str.tostring(math.round(close - onh, 1)) + "pts above ONH | score=" + str.tostring(onh_brk_score)),
+         alert.freq_once_per_bar_close)
+
+// ── Playbook: ONL Breakdown SHORT ─────────────────────────────────────────
+if sig_onl_break_short
+    _sl  = (not na(onl) ? onl : close) + atr_sl
+    _tp1 = f_tp1_short(close, _sl)
+    _tp2 = f_tp2_short(close, _sl)
+    alert(f_json("ONL_BREAKDOWN_CONTINUATION_SHORT", close, _sl, _tp1, _tp2,
+         "ONL breakdown " + str.tostring(math.round(onl - close, 1)) + "pts below ONL | score=" + str.tostring(onl_brk_score)),
+         alert.freq_once_per_bar_close)
+
+// ── Playbook: Bullish Trend Pullback LONG ─────────────────────────────────
+if sig_bull_pullback
+    _sl  = close - atr_sl
+    _tp1 = f_tp1_long(close, _sl)
+    _tp2 = f_tp2_long(close, _sl)
+    alert(f_json("BULLISH_TREND_PULLBACK_LONG", close, _sl, _tp1, _tp2,
+         "Bull pullback | trend_diff=" + str.tostring(math.round(trend_diff, 1)) + " | score=" + str.tostring(btp_score)),
+         alert.freq_once_per_bar_close)
+
+// ── Playbook: Bearish Trend Pullback SHORT ────────────────────────────────
+if sig_bear_pullback
+    _sl  = close + atr_sl
+    _tp1 = f_tp1_short(close, _sl)
+    _tp2 = f_tp2_short(close, _sl)
+    alert(f_json("BEARISH_TREND_PULLBACK_SHORT", close, _sl, _tp1, _tp2,
+         "Bear pullback | trend_diff=" + str.tostring(math.round(trend_diff, 1)) + " | score=" + str.tostring(betp_score)),
+         alert.freq_once_per_bar_close)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── VISUAL DISPLAY
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Level plots (connected horizontal lines across all bars) ──────────────
+plot(i_show_lvl ? pdh : na, "PDH", color=color.new(color.red,    20), linewidth=1, style=plot.style_circles)
+plot(i_show_lvl ? pdl : na, "PDL", color=color.new(color.green,  20), linewidth=1, style=plot.style_circles)
+plot(i_show_lvl ? pdc : na, "PDC", color=color.new(color.gray,   40), linewidth=1, style=plot.style_circles)
+plot(i_show_lvl ? onh : na, "ONH", color=color.new(color.orange, 30), linewidth=1, style=plot.style_circles)
+plot(i_show_lvl ? onl : na, "ONL", color=color.new(color.teal,   30), linewidth=1, style=plot.style_circles)
+plot(i_show_lvl ? orh : na, "ORH", color=color.new(color.blue,   30), linewidth=1, style=plot.style_circles)
+plot(i_show_lvl ? orl : na, "ORL", color=color.new(color.purple, 30), linewidth=1, style=plot.style_circles)
+plot(i_show_lvl ? pmh : na, "PMH", color=color.new(color.yellow, 40), linewidth=1, style=plot.style_circles)
+plot(i_show_lvl ? pml : na, "PML", color=color.new(color.lime,   40), linewidth=1, style=plot.style_circles)
+
+// ── Signal labels ─────────────────────────────────────────────────────────
+if i_show_lbl
+    // Sweep signals — SHORT (red, above bar)
+    if sig_pdh_short
+        label.new(bar_index, high, "▼ PDH SHORT",  yloc=yloc.abovebar, color=color.red,    textcolor=color.white, style=label.style_label_down, size=size.small)
+    if sig_onh_short
+        label.new(bar_index, high, "▼ ONH SHORT",  yloc=yloc.abovebar, color=color.red,    textcolor=color.white, style=label.style_label_down, size=size.small)
+    if sig_orh_short
+        label.new(bar_index, high, "▼ ORH SHORT",  yloc=yloc.abovebar, color=color.orange, textcolor=color.white, style=label.style_label_down, size=size.small)
+    if sig_pmh_short
+        label.new(bar_index, high, "▼ PMH SHORT",  yloc=yloc.abovebar, color=color.maroon, textcolor=color.white, style=label.style_label_down, size=size.small)
+    // Sweep signals — LONG (green, below bar)
+    if sig_pdl_long
+        label.new(bar_index, low,  "▲ PDL LONG",   yloc=yloc.belowbar, color=color.green,  textcolor=color.white, style=label.style_label_up,   size=size.small)
+    if sig_onl_long
+        label.new(bar_index, low,  "▲ ONL LONG",   yloc=yloc.belowbar, color=color.green,  textcolor=color.white, style=label.style_label_up,   size=size.small)
+    if sig_orl_long
+        label.new(bar_index, low,  "▲ ORL LONG",   yloc=yloc.belowbar, color=color.teal,   textcolor=color.white, style=label.style_label_up,   size=size.small)
+    if sig_pml_long
+        label.new(bar_index, low,  "▲ PML LONG",   yloc=yloc.belowbar, color=color.lime,   textcolor=color.white, style=label.style_label_up,   size=size.small)
+    // Playbook signals
+    if sig_orb_long
+        label.new(bar_index, low,  "▲ ORB LONG",   yloc=yloc.belowbar, color=color.blue,   textcolor=color.white, style=label.style_label_up,   size=size.normal)
+    if sig_orb_short
+        label.new(bar_index, high, "▼ ORB SHORT",  yloc=yloc.abovebar, color=color.blue,   textcolor=color.white, style=label.style_label_down, size=size.normal)
+    if sig_onh_break_long
+        label.new(bar_index, low,  "▲ ONH BRK",    yloc=yloc.belowbar, color=color.purple, textcolor=color.white, style=label.style_label_up,   size=size.small)
+    if sig_onl_break_short
+        label.new(bar_index, high, "▼ ONL BRK",    yloc=yloc.abovebar, color=color.purple, textcolor=color.white, style=label.style_label_down, size=size.small)
+    if sig_bull_pullback
+        label.new(bar_index, low,  "▲ BULL PB",    yloc=yloc.belowbar, color=color.green,  textcolor=color.white, style=label.style_label_up,   size=size.small)
+    if sig_bear_pullback
+        label.new(bar_index, high, "▼ BEAR PB",    yloc=yloc.abovebar, color=color.red,    textcolor=color.white, style=label.style_label_down, size=size.small)
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ── NAMED ALERT CONDITIONS
+// ═══════════════════════════════════════════════════════════════════════════
+// Optional — lets you create individual per-setup alerts if preferred.
+// For webhook integration, use the single "Any alert() function call" alert instead.
+
+bool any_signal = sig_pdh_short or sig_pdl_long or sig_onh_short or sig_onl_long or
+                  sig_orh_short or sig_orl_long or sig_pmh_short or sig_pml_long or
+                  sig_orb_long  or sig_orb_short or
+                  sig_onh_break_long or sig_onl_break_short or
+                  sig_bull_pullback  or sig_bear_pullback
+
+alertcondition(any_signal,          "Any NQ Signal",                   "NQ setup detected")
+alertcondition(sig_pdh_short,       "PDH Sweep Reversal SHORT",        "PDH SHORT")
+alertcondition(sig_pdl_long,        "PDL Sweep Reversal LONG",         "PDL LONG")
+alertcondition(sig_onh_short,       "ONH Sweep Reversal SHORT",        "ONH SHORT")
+alertcondition(sig_onl_long,        "ONL Sweep Reversal LONG",         "ONL LONG")
+alertcondition(sig_orh_short,       "ORH Sweep Reversal SHORT",        "ORH SHORT")
+alertcondition(sig_orl_long,        "ORL Sweep Reversal LONG",         "ORL LONG")
+alertcondition(sig_pmh_short,       "PMH Sweep Reversal SHORT",        "PMH SHORT")
+alertcondition(sig_pml_long,        "PML Sweep Reversal LONG",         "PML LONG")
+alertcondition(sig_orb_long,        "Bullish ORB LONG",                "ORB LONG")
+alertcondition(sig_orb_short,       "Bearish ORB SHORT",               "ORB SHORT")
+alertcondition(sig_onh_break_long,  "ONH Breakout Continuation LONG",  "ONH Breakout LONG")
+alertcondition(sig_onl_break_short, "ONL Breakdown Continuation SHORT", "ONL Breakdown SHORT")
+alertcondition(sig_bull_pullback,   "Bullish Trend Pullback LONG",     "Bull Pullback LONG")
+alertcondition(sig_bear_pullback,   "Bearish Trend Pullback SHORT",    "Bear Pullback SHORT")
