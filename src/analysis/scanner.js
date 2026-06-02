@@ -221,13 +221,19 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
   }
 
   const currentPrice = levels.currentPrice;
+  const priceSource  = levels.priceSource ?? "unknown";
+
+  logger.info(
+    `[scanner] Entry price: ${currentPrice} (${priceSource}) | ` +
+    `ATR: ${atrData?.atr ?? "N/A"} pts | Trend: 1H ${trendData?.trend1H ?? "?"} / 15m ${trendData?.trend15m ?? "?"}`
+  );
 
   // ── Step 2: Score each direction ─────────────────────────────
   const longTriggers  = scoreDirection(longSweep,  playbookResult, "LONG");
   const shortTriggers = scoreDirection(shortSweep, playbookResult, "SHORT");
 
   logger.info(
-    `[scanner] Triggers — LONG: ${longTriggers.score} | SHORT: ${shortTriggers.score} | Price: ${currentPrice}`
+    `[scanner] Triggers — LONG: ${longTriggers.score} | SHORT: ${shortTriggers.score} | Price: ${currentPrice} (${priceSource})`
   );
 
   // No triggers at all → exit early

@@ -65,6 +65,10 @@ async function sendAlert(result) {
 
   const description = decision.primaryReason || triggerSummary;
 
+  const priceTag = levels?.priceSource === "bid_ask_mid"   ? "🟢 live"
+                 : levels?.priceSource === "quote_delayed" ? "🟡 ~10m delay"
+                 : "🔴 bar close";
+
   const fields = [
     {
       name:   "📊 Score",
@@ -79,7 +83,7 @@ async function sendAlert(result) {
     {
       name:   "🎯 Suggested Levels",
       value:  [
-        `Entry: **${signal.entry}**`,
+        `Entry: **${signal.entry}** ${priceTag}`,
         `SL: ${signal.sl} (${signal.slPoints} pts)`,
         `TP1: ${signal.tp1} (R:${signal.rr1})`,
         `TP2: ${signal.tp2} (R:${signal.rr2})`,

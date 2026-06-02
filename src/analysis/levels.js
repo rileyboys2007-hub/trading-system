@@ -98,6 +98,30 @@ async function fetchIntradayBars(symbol) {
   return (result.quotes || []).filter(q => q.high && q.low);
 }
 
+/**
+ * Fetch a real-time (or near real-time) price from the Yahoo Finance quote endpoint.
+ * For NQ=F futures:
+ *   – bid/ask are live exchange prices (0.50 pt spread → mid is best entry estimate)
+ *   – regularMarketPrice has a 10-minute delay (same as chart bars)
+ *
+ * Returns { price, source } where source is "bid_ask_mid" | "quote" | null.
+ */
+async function fetchRealtimePrice(symbol) {
+  try {
+    const q = await yf.quote(symbol, {}, { validateResult: false });
+    if (q.bid && q.ask && q.bid > 0 && q.ask > 0) {
+      const mid = +((q.bid + q.ask) / 2).toFixed(2);
+      return { price: mid, source: "bid_ask_mid", bid: q.bid, ask: q.ask };
+    }
+    if (q.regularMarketPrice) {
+      return { price: q.regularMarketPrice, source: "quote_delayed" };
+    }
+  } catch (err) {
+    logger.warn(`[levels] Real-time quote failed: ${err.message}`);
+  }
+  return null;
+}
+
 // ── Level Calculators ─────────────────────────────────────────────
 
 /** PDH / PDL / PDC — last COMPLETE trading day. */
@@ -236,16 +260,28 @@ function getSessionState() {
 async function getKeyLevels(symbol = "NQ=F") {
   logger.info(`[levels] Calculating key levels for ${symbol}...`);
 
-  const [dailyBars, intradayBars] = await Promise.all([
+  const [dailyBars, intradayBars, realtimeQuote] = await Promise.all([
     fetchDailyBars(symbol),
     fetchIntradayBars(symbol),
+    fetchRealtimePrice(symbol),
   ]);
 
   logger.info(`[levels] Daily bars: ${dailyBars.length} | Intraday bars: ${intradayBars.length}`);
 
-  // Current price from last intraday bar
+  // Current price priority:
+  //   1. Bid/ask mid from quote endpoint (live exchange prices for NQ=F)
+  //   2. regularMarketPrice from quote (10-min delayed but more current than bar data)
+  //   3. Last 5m bar close (10–15 min delayed — fallback only)
   const lastBar     = intradayBars[intradayBars.length - 1];
-  const currentPrice = lastBar?.close ?? null;
+  const barPrice    = lastBar?.close ?? null;
+  const currentPrice = realtimeQuote?.price ?? barPrice;
+  const priceSource  = realtimeQuote?.source ?? "bar_close";
+
+  logger.info(
+    `[levels] Price: ${currentPrice} (source: ${priceSource})` +
+    (realtimeQuote?.bid ? ` | bid: ${realtimeQuote.bid} ask: ${realtimeQuote.ask}` : "") +
+    (barPrice && barPrice !== currentPrice ? ` | bar close (delayed): ${barPrice}` : "")
+  );
 
   // Calculate each level group
   const pd  = calcPreviousDay(dailyBars);
@@ -274,6 +310,7 @@ async function getKeyLevels(symbol = "NQ=F") {
   const result = {
     symbol,
     currentPrice,
+    priceSource,                    // "bid_ask_mid" | "quote_delayed" | "bar_close"
     sessionState:      getSessionState(),
     calculatedAt:      new Date().toISOString(),
     orMinutes:         OR_MINUTES,
