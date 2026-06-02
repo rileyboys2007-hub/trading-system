@@ -30,6 +30,7 @@ const { detectLiquiditySweeps } = require("./liquidity");
 const { detectPlaybooks }       = require("./playbooks");
 const { getNewsRisk }           = require("../services/newsRisk");
 const { calculateVWAP }         = require("./vwap");
+const { getTrendAlignment }     = require("./trendAlignment");
 
 // ── Grade Map ─────────────────────────────────────────────────────
 
@@ -383,6 +384,63 @@ function scorePlaybookQuality(playbookResult, direction) {
   return { score: 20, explanation: `No playbook matched for ${direction} — low structural conviction` };
 }
 
+/**
+ * 8. Multi-Timeframe Trend Alignment (weight: 10%)
+ *
+ * Scores whether the 1H and 15m trends support the trade direction.
+ * Trading WITH the higher-timeframe trend dramatically improves win rate
+ * by ensuring you're not fighting institutional order flow.
+ *
+ * Score matrix:
+ *   1H ✓  15m ✓  → 92   (both TFs aligned — strongest signal)
+ *   1H ✓  15m ~  → 75   (1H trend is enough, 15m just hasn't confirmed)
+ *   1H ~  15m ✓  → 65   (15m leading, 1H not yet turned)
+ *   1H ~  15m ~  → 50   (ranging / no directional bias — neutral)
+ *   1H ✓  15m ✗  → 42   (disagreement — short-term pullback vs trend)
+ *   1H ✗  15m ✓  → 38   (disagreement — 1H opposing despite 15m signal)
+ *   1H ✗  15m ~  → 25   (1H trend working against you)
+ *   1H ~  15m ✗  → 22   (15m trend working against you)
+ *   1H ✗  15m ✗  →  8   (both TFs against — strong counter-trend warning)
+ */
+function scoreTrendAlignment(trendResult, direction) {
+  if (!trendResult) {
+    return { score: 50, explanation: "Trend data unavailable — neutral score applied" };
+  }
+
+  const { trend1H, trend15m } = trendResult;
+  const dirTrend = direction === "LONG" ? "BULLISH" : "BEARISH";
+  const oppTrend = direction === "LONG" ? "BEARISH" : "BULLISH";
+
+  const h1Match  = trend1H  === dirTrend;
+  const h1Opp    = trend1H  === oppTrend;
+  const m15Match = trend15m === dirTrend;
+  const m15Opp   = trend15m === oppTrend;
+
+  let score;
+  if      (h1Match && m15Match)  score = 92;
+  else if (h1Match && !m15Opp)   score = 75;
+  else if (!h1Opp  && m15Match)  score = 65;
+  else if (!h1Opp  && !m15Opp)   score = 50;
+  else if (h1Match && m15Opp)    score = 42;
+  else if (h1Opp   && m15Match)  score = 38;
+  else if (h1Opp   && !m15Opp)   score = 25;
+  else if (!h1Opp  && m15Opp)    score = 22;
+  else                           score = 8;    // both TFs against
+
+  const aligned  = h1Match && m15Match;
+  const opposed  = h1Opp || m15Opp;
+  const status   = aligned ? "✓ ALIGNED" : opposed ? "✗ OPPOSED" : "~ MIXED";
+  const trendIcon = t => t === "BULLISH" ? "▲" : t === "BEARISH" ? "▼" : "—";
+
+  return {
+    score,
+    trend1H,
+    trend15m,
+    aligned,
+    explanation: `${status} — 1H: ${trend1H} ${trendIcon(trend1H)} | 15m: ${trend15m} ${trendIcon(trend15m)} | Trade: ${direction}`,
+  };
+}
+
 // ── Grade Explainer ───────────────────────────────────────────────
 
 function buildSummary(factors, grade, totalScore) {
@@ -402,14 +460,16 @@ function buildSummary(factors, grade, totalScore) {
 // ── Main Export ───────────────────────────────────────────────────
 
 const FACTOR_WEIGHTS = {
-  dailyBias:      0.18,
-  internals:      0.17,
-  playbookQuality:0.18,
-  liquiditySweep: 0.13,
-  sessionQuality: 0.11,
-  vwap:           0.12,
-  volume:         0.07,
-  newsRisk:       0.04,
+  dailyBias:      0.16,  // was 0.18 — reduced slightly for new trend factor
+  internals:      0.15,  // was 0.17
+  playbookQuality:0.17,  // was 0.18
+  liquiditySweep: 0.12,  // was 0.13
+  sessionQuality: 0.09,  // was 0.11
+  vwap:           0.11,  // was 0.12
+  volume:         0.06,  // was 0.07
+  newsRisk:       0.04,  // unchanged
+  trendAlignment: 0.10,  // NEW — 1H + 15m trend confirmation
+  // Sum: 0.16+0.15+0.17+0.12+0.09+0.11+0.06+0.04+0.10 = 1.00 ✓
 };
 
 /**
@@ -424,6 +484,7 @@ const FACTOR_WEIGHTS = {
  * @param {object} [opts.sweep]         Pre-fetched sweep result
  * @param {object} [opts.playbook]      Pre-fetched playbook result
  * @param {object} [opts.newsRisk]      Pre-fetched news risk result
+ * @param {object} [opts.trend]        Pre-fetched trend alignment result (1H + 15m)
  */
 async function scoreSignal(opts = {}) {
   const { direction = "LONG", symbol = "NQ=F" } = opts;
@@ -433,13 +494,14 @@ async function scoreSignal(opts = {}) {
   // Fetch any missing data in parallel — each wrapped so one failure doesn't kill the rest
   const safe = fn => fn.catch(e => { logger.warn(`[scoring] Module failed: ${e.message}`); return null; });
 
-  const [bias, internals, sweep, playbook, newsRiskData, vwapData] = await Promise.all([
+  const [bias, internals, sweep, playbook, newsRiskData, vwapData, trendData] = await Promise.all([
     opts.bias      != null ? opts.bias      : safe(getDailyBias()),
     opts.internals != null ? opts.internals : safe(getMarketInternals()),
     opts.sweep     != null ? opts.sweep     : safe(detectLiquiditySweeps({ symbol })),
     opts.playbook  != null ? opts.playbook  : safe(detectPlaybooks(symbol)),
     opts.newsRisk  != null ? opts.newsRisk  : safe(getNewsRisk()),
     opts.vwap      != null ? opts.vwap      : safe(calculateVWAP(symbol)),
+    opts.trend     != null ? opts.trend     : safe(getTrendAlignment(symbol)),
   ]);
 
   // Score each factor
@@ -452,6 +514,7 @@ async function scoreSignal(opts = {}) {
     vwap:            scoreVWAP(vwapData, direction),
     volume:          scoreVolume(internals),
     newsRisk:        scoreNewsRisk(newsRiskData),
+    trendAlignment:  scoreTrendAlignment(trendData, direction),
   };
 
   // Weighted composite score

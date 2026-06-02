@@ -19,9 +19,16 @@
  *   If both sides score ≥ 2 → conflicting signals, no alert.
  *
  * ── SL / TP Calculation ───────────────────────────────────────────
- *   SL: swept level price (if sweep triggered), else entry ± 30 pts
+ *   SL: swept level price (if sweep triggered)
+ *       else ATR-based dynamic stop (14-period 5m ATR × 2.0, clamped 14–55 pts)
+ *       else fixed fallback 30 pts
  *   TP1: entry + (entry - SL) × 1.5
  *   TP2: entry + (entry - SL) × 3.0
+ *
+ * ── Multi-Timeframe Trend ─────────────────────────────────────────
+ *   getTrendAlignment() checks 1H (20 EMA) + 15m (9 EMA) trends.
+ *   Trend alignment is scored as a 9th factor (10% weight) in scoring.js.
+ *   Displayed as a field in every Discord alert.
  *
  * ── Output ────────────────────────────────────────────────────────
  *   { triggered, direction, signal, scoreResult, decision, levels, triggerSummary }
@@ -35,6 +42,8 @@ const { detectLiquiditySweeps } = require("./liquidity");
 const { detectPlaybooks }       = require("./playbooks");
 const { getDailyBias }          = require("./bias");
 const { calculateVWAP }         = require("./vwap");
+const { getATR }                = require("./atr");
+const { getTrendAlignment }     = require("./trendAlignment");
 const { scoreSignal }           = require("./scoring");
 const { makeDecision }          = require("./decision");
 const { checkPreTrade }         = require("./riskManagement");
@@ -102,18 +111,30 @@ function scoreDirection(sweepResult, playbookResult, direction) {
 
 /**
  * Build a synthetic signal for the scanner (no TradingView input).
- * SL anchored to swept level when available.
+ * SL priority: 1) swept level  2) ATR-based dynamic  3) fixed 30-pt fallback
+ *
+ * @param {string} symbol
+ * @param {string} direction
+ * @param {number} currentPrice
+ * @param {string|null} sweepLevel       name of swept level (e.g. "PDH")
+ * @param {number|null} sweepLevelPrice  price of swept level
+ * @param {number|null} atr             14-period 5m ATR (from getATR)
  */
-function buildSignal(symbol, direction, currentPrice, sweepLevel, sweepLevelPrice) {
+function buildSignal(symbol, direction, currentPrice, sweepLevel, sweepLevelPrice, atr = null) {
   const isLong = direction === "LONG";
 
   let sl;
   let slNote;
 
   if (sweepLevelPrice != null) {
-    // Use the swept level as the stop anchor
+    // Best case: anchor SL to the swept structural level
     sl     = sweepLevelPrice;
     slNote = `SL at swept level (${sweepLevel}) — adjust for your chart`;
+  } else if (atr != null) {
+    // ATR-based dynamic SL: 2× ATR clamped to [14, 55] pts
+    const atrSL = Math.max(14, Math.min(55, Math.round(atr * 2.0)));
+    sl     = isLong ? currentPrice - atrSL : currentPrice + atrSL;
+    slNote = `SL dynamic (ATR ${atr} pts × 2.0 = ${atrSL} pts) — adjust before entry`;
   } else {
     // Fallback: fixed distance
     sl     = isLong ? currentPrice - DEFAULT_SL_BUFFER : currentPrice + DEFAULT_SL_BUFFER;
@@ -176,19 +197,23 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
     };
   }
 
-  // ── Step 1: Collect trigger data for both directions ─────────
+  // ── Step 1: Collect trigger + context data in parallel ──────
   const [
     levels,
     longSweep,
     shortSweep,
     playbookResult,
     vwapData,
+    atrData,
+    trendData,
   ] = await Promise.all([
     safe("levels",    () => getKeyLevels(symbol)),
     safe("sweep:LONG",  () => detectLiquiditySweeps({ direction: "LONG",  symbol })),
     safe("sweep:SHORT", () => detectLiquiditySweeps({ direction: "SHORT", symbol })),
-    safe("playbooks", () => detectPlaybooks(symbol)),   // fixed: pass string, not object
+    safe("playbooks", () => detectPlaybooks(symbol)),
     safe("vwap",      () => calculateVWAP(symbol)),
+    safe("atr",       () => getATR(symbol)),
+    safe("trend",     () => getTrendAlignment(symbol)),
   ]);
 
   if (!levels) {
@@ -260,7 +285,7 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
   const sweepLevel      = activeTriggers.sweep?.level ?? null;
   const sweepLevelPrice = activeTriggers.sweep?.levelPrice ?? null;
 
-  const signal = buildSignal(symbol, direction, currentPrice, sweepLevel, sweepLevelPrice);
+  const signal = buildSignal(symbol, direction, currentPrice, sweepLevel, sweepLevelPrice, atrData?.atr ?? null);
 
   // Attach setup name from playbook if matched
   if (activeTriggers.playbook?.name) {
@@ -286,6 +311,7 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
     playbook: playbookResult,   // full result for direction-aware scoring
     vwap:     vwapData,
     newsRisk: newsCheck,
+    trend:    trendData,        // pre-fetched 1H + 15m trend alignment
   }));
 
   const decision = await safe("decision", () => makeDecision({
@@ -323,6 +349,8 @@ async function runScan(symbol = "NQ=F", { forceRun = false } = {}) {
     riskCheck,
     levels,
     vwap:          vwapData,
+    trend:         trendData,   // 1H + 15m trend alignment
+    atr:           atrData,     // ATR data used for SL sizing
     newsRisk:      newsCheck,
     triggerSummary,
     scannedAt:     new Date().toISOString(),
