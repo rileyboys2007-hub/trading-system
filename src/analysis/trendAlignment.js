@@ -128,11 +128,12 @@ async function fetchBars(symbol, interval, daysBack) {
 async function getTrendAlignment(symbol = "NQ=F") {
   logger.info(`[trendAlignment] Analyzing 1H + 15m trend for ${symbol}...`);
 
-  let bars1H, bars15m;
+  let bars1H, bars15m, bars5m;
   try {
-    [bars1H, bars15m] = await Promise.all([
+    [bars1H, bars15m, bars5m] = await Promise.all([
       fetchBars(symbol, "1h",  7),   // 7 days → ~35+ 1H RTH bars
       fetchBars(symbol, "15m", 3),   // 3 days → ~78+ 15m RTH bars
+      fetchBars(symbol, "5m",  2),   // 2 days → ~156+ 5m RTH bars
     ]);
   } catch (err) {
     logger.warn(`[trendAlignment] Fetch failed: ${err.message}`);
@@ -151,6 +152,10 @@ async function getTrendAlignment(symbol = "NQ=F") {
 
   const trend1H  = detectTrend(bars1H,  20);   // 20-period EMA on 1H
   const trend15m = detectTrend(bars15m,  9);   // 9-period EMA on 15m
+  // 5m bars may be unavailable (e.g. market closed, Yahoo delay); graceful fallback
+  const trend5m  = (bars5m && bars5m.length >= 12)
+    ? detectTrend(bars5m, 9)   // 9-period EMA on 5m
+    : null;
 
   const aligned    = trend1H === trend15m && trend1H !== "NEUTRAL";
   const alignedWith = aligned
@@ -160,33 +165,44 @@ async function getTrendAlignment(symbol = "NQ=F") {
   // 1H takes priority for consensus; fall back to 15m if 1H is neutral
   const consensus = trend1H !== "NEUTRAL" ? trend1H : trend15m;
 
-  // Strength reflects how strongly both timeframes agree
+  // Strength reflects how strongly all available timeframes agree
+  const tfs    = [trend1H, trend15m, trend5m].filter(Boolean);
+  const unique = new Set(tfs.filter(t => t !== "NEUTRAL"));
   let strength;
-  if (aligned)                       strength = 85;
-  else if (trend1H !== "NEUTRAL")    strength = 60;  // 1H clear, 15m unclear
-  else if (trend15m !== "NEUTRAL")   strength = 40;  // only 15m has signal
-  else                               strength = 25;  // both neutral
+  if (unique.size === 1 && tfs.filter(t => t !== "NEUTRAL").length === tfs.length) strength = 90;
+  else if (aligned)                       strength = 85;
+  else if (trend1H !== "NEUTRAL")         strength = 60;
+  else if (trend15m !== "NEUTRAL")        strength = 40;
+  else                                    strength = 25;
 
   // Human-readable
   const trendIcon = (t) => t === "BULLISH" ? "▲" : t === "BEARISH" ? "▼" : "—";
   const summary = aligned
-    ? `Both timeframes ${trend1H.toLowerCase()} ${trendIcon(trend1H)}`
-    : `1H: ${trend1H} ${trendIcon(trend1H)} | 15m: ${trend15m} ${trendIcon(trend15m)}`;
+    ? `All timeframes ${trend1H.toLowerCase()} ${trendIcon(trend1H)}`
+    : [
+        `1H: ${trend1H} ${trendIcon(trend1H)}`,
+        `15m: ${trend15m} ${trendIcon(trend15m)}`,
+        trend5m ? `5m: ${trend5m} ${trendIcon(trend5m)}` : null,
+      ].filter(Boolean).join(" | ");
 
   logger.info(
     `[trendAlignment] ${symbol} | 1H: ${trend1H} | 15m: ${trend15m} | ` +
+    (trend5m ? `5m: ${trend5m} | ` : "") +
     `Aligned: ${aligned} | Favors: ${alignedWith ?? "neither"} | Strength: ${strength}`
   );
 
   return {
     trend1H,
     trend15m,
+    trend5m,
     aligned,
     alignedWith,
     consensus,
     strength,
     bars1H:       bars1H.length,
     bars15m:      bars15m.length,
+    bars5m:       bars5m?.length ?? 0,
+    source:       "YahooFinance",
     summary,
     calculatedAt: new Date().toISOString(),
   };

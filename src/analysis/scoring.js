@@ -115,19 +115,56 @@ function scoreInternalsAlignment(internalsResult, direction) {
   return { score, sentiment, confidence, aligned, explanation };
 }
 
+// ── Timezone Helper ───────────────────────────────────────────────
+/**
+ * Returns the current hour and minute in US Eastern Time (America/New_York).
+ *
+ * Uses Intl.DateTimeFormat.formatToParts() — more reliable than toLocaleString()
+ * on VPS Node.js builds that ship without full ICU data (which causes toLocaleString
+ * to fall back to the system clock timezone rather than the requested one).
+ *
+ * Falls back to a manual DST-aware UTC calculation if Intl itself fails.
+ *   DST start: 2nd Sunday of March  at 2:00 AM EST = 07:00 UTC
+ *   DST end:   1st Sunday of November at 2:00 AM EDT = 06:00 UTC
+ */
+function getEasternHM() {
+  const now = new Date();
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      hour:     "2-digit",
+      minute:   "2-digit",
+      hour12:   false,
+    }).formatToParts(now);
+    const hPart = parts.find(p => p.type === "hour");
+    const mPart = parts.find(p => p.type === "minute");
+    if (!hPart || !mPart) throw new Error("missing parts");
+    const h = parseInt(hPart.value, 10) % 24;  // guard: some Node builds return "24" at midnight
+    const m = parseInt(mPart.value, 10);
+    return { h, m };
+  } catch (_) {
+    // Manual fallback
+    const y       = now.getUTCFullYear();
+    const mar1Day = new Date(Date.UTC(y, 2, 1)).getUTCDay();
+    const nov1Day = new Date(Date.UTC(y, 10, 1)).getUTCDay();
+    const dstStartDay = 8 + (7 - mar1Day) % 7;   // 2nd Sunday in March
+    const dstEndDay   = 1 + (7 - nov1Day) % 7;   // 1st Sunday in November
+    const dstStart    = Date.UTC(y, 2,  dstStartDay, 7, 0, 0);
+    const dstEnd      = Date.UTC(y, 10, dstEndDay,   6, 0, 0);
+    const isDST       = now.getTime() >= dstStart && now.getTime() < dstEnd;
+    const d           = new Date(now.getTime() + (isDST ? -4 : -5) * 3_600_000);
+    return { h: d.getUTCHours(), m: d.getUTCMinutes() };
+  }
+}
+
 /**
  * 3. Session Quality (weight: 12%)
  * NQ has high-probability time windows. Score based on ET time.
  */
 function scoreSessionQuality() {
-  const etStr = new Date().toLocaleString("en-US", {
-    timeZone:  "America/New_York",
-    hour:      "2-digit",
-    minute:    "2-digit",
-    hour12:    false,
-  });
-  const [h, m]   = etStr.split(":").map(Number);
+  const { h, m } = getEasternHM();
   const totalMin = h * 60 + m;
+  const etStr    = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;  // for timeET field
 
   let score, session, explanation;
 
@@ -387,27 +424,33 @@ function scorePlaybookQuality(playbookResult, direction) {
 /**
  * 8. Multi-Timeframe Trend Alignment (weight: 10%)
  *
- * Scores whether the 1H and 15m trends support the trade direction.
- * Trading WITH the higher-timeframe trend dramatically improves win rate
- * by ensuring you're not fighting institutional order flow.
+ * When Pine Script provides t5/t15/t60 (TradingView-native EMA 9 vs 21),
+ * all three timeframes are scored using a weighted point system:
  *
- * Score matrix:
- *   1H ✓  15m ✓  → 92   (both TFs aligned — strongest signal)
- *   1H ✓  15m ~  → 75   (1H trend is enough, 15m just hasn't confirmed)
- *   1H ~  15m ✓  → 65   (15m leading, 1H not yet turned)
- *   1H ~  15m ~  → 50   (ranging / no directional bias — neutral)
- *   1H ✓  15m ✗  → 42   (disagreement — short-term pullback vs trend)
- *   1H ✗  15m ✓  → 38   (disagreement — 1H opposing despite 15m signal)
- *   1H ✗  15m ~  → 25   (1H trend working against you)
- *   1H ~  15m ✗  → 22   (15m trend working against you)
- *   1H ✗  15m ✗  →  8   (both TFs against — strong counter-trend warning)
+ *   1H  = 3 pts   (institutional bias — most weight)
+ *   15m = 2 pts   (swing context)
+ *   5m  = 1 pt    (immediate momentum / entry timing)
+ *
+ * Net range: -6 (all against) → +6 (all aligned)
+ * Mapped linearly to score 5–95:  score = 5 + ((net + 6) / 12) * 90
+ *
+ * Example net → score:
+ *   +6 → 95  (5m ✓ 15m ✓ 1H ✓ — full stack aligned)
+ *   +5 → 88  (1H ✓ 15m ✓, 5m neutral)
+ *   +3 → 73  (1H aligned, others neutral)
+ *    0 → 50  (mixed / all neutral)
+ *   -3 → 28  (1H against, others neutral)
+ *   -6 →  5  (full stack against — strong counter-trend warning)
+ *
+ * Falls back to the original 2-TF matrix (1H + 15m) when 5m data is absent
+ * (e.g. when the Yahoo Finance fallback is used instead of TradingView).
  */
 function scoreTrendAlignment(trendResult, direction) {
   if (!trendResult) {
     return { score: 50, explanation: "Trend data unavailable — neutral score applied" };
   }
 
-  const { trend1H, trend15m } = trendResult;
+  const { trend1H, trend15m, trend5m } = trendResult;
   const dirTrend = direction === "LONG" ? "BULLISH" : "BEARISH";
   const oppTrend = direction === "LONG" ? "BEARISH" : "BULLISH";
 
@@ -416,6 +459,37 @@ function scoreTrendAlignment(trendResult, direction) {
   const m15Match = trend15m === dirTrend;
   const m15Opp   = trend15m === oppTrend;
 
+  const trendIcon = t => t === "BULLISH" ? "▲" : t === "BEARISH" ? "▼" : "—";
+
+  // ── 3-TF path (TradingView-native data: has t5/t15/t60) ──────────
+  if (trend5m != null) {
+    const m5Match = trend5m === dirTrend;
+    const m5Opp   = trend5m === oppTrend;
+
+    // Weighted net: 1H = 3 pts, 15m = 2 pts, 5m = 1 pt
+    const net = (h1Match  ? 3 : h1Opp  ? -3 : 0)
+              + (m15Match ? 2 : m15Opp ? -2 : 0)
+              + (m5Match  ? 1 : m5Opp  ? -1 : 0);
+
+    // Map [-6, +6] → [5, 95]
+    const score   = Math.max(5, Math.min(95, Math.round(5 + ((net + 6) / 12) * 90)));
+    const aligned = h1Match && m15Match && m5Match;
+    const opposed = h1Opp || m15Opp || m5Opp;
+    const status  = aligned ? "✓ ALIGNED" : opposed ? "✗ OPPOSED" : "~ MIXED";
+
+    return {
+      score,
+      trend1H,
+      trend15m,
+      trend5m,
+      aligned,
+      source: trendResult.source || "TradingView",
+      explanation:
+        `${status} — 5m: ${trend5m} ${trendIcon(trend5m)} | 15m: ${trend15m} ${trendIcon(trend15m)} | 1H: ${trend1H} ${trendIcon(trend1H)} | Trade: ${direction}`,
+    };
+  }
+
+  // ── 2-TF fallback (Yahoo Finance — no 5m data) ───────────────────
   let score;
   if      (h1Match && m15Match)  score = 92;
   else if (h1Match && !m15Opp)   score = 75;
@@ -425,18 +499,19 @@ function scoreTrendAlignment(trendResult, direction) {
   else if (h1Opp   && m15Match)  score = 38;
   else if (h1Opp   && !m15Opp)   score = 25;
   else if (!h1Opp  && m15Opp)    score = 22;
-  else                           score = 8;    // both TFs against
+  else                           score = 8;
 
   const aligned  = h1Match && m15Match;
   const opposed  = h1Opp || m15Opp;
   const status   = aligned ? "✓ ALIGNED" : opposed ? "✗ OPPOSED" : "~ MIXED";
-  const trendIcon = t => t === "BULLISH" ? "▲" : t === "BEARISH" ? "▼" : "—";
 
   return {
     score,
     trend1H,
     trend15m,
+    trend5m: null,
     aligned,
+    source: "YahooFinance",
     explanation: `${status} — 1H: ${trend1H} ${trendIcon(trend1H)} | 15m: ${trend15m} ${trendIcon(trend15m)} | Trade: ${direction}`,
   };
 }

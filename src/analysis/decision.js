@@ -121,7 +121,7 @@ function computeDecision(scoreResult) {
 
   // Score-based decision
   if      (totalScore >= 80) return { decision: "TAKE",  triggeredRules: [], greenCount };
-  else if (totalScore >= 65) return { decision: "TAKE",  triggeredRules: [], greenCount };
+  else if (totalScore >= 78) return { decision: "TAKE",  triggeredRules: [], greenCount };
   else if (totalScore >= 50) return { decision: "WAIT",  triggeredRules: [], greenCount };
   else                       return { decision: "AVOID", triggeredRules: [], greenCount };
 }

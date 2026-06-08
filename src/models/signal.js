@@ -59,6 +59,35 @@ function createSignal(raw) {
     rr1,
     rr2,
 
+    // MTF trend from Pine Script (EMA 9 vs 21, "BULLISH" | "NEUTRAL" | "BEARISH")
+    // Populated when TradingView sends t5/t15/t60 in the webhook payload.
+    // Used by the scoring engine instead of a slower Yahoo Finance fetch.
+    trend5m:    raw.t5  || null,
+    trend15m:   raw.t15 || null,
+    trend1h:    raw.t60 || null,
+    // Full MTF context string from Pine Script f_mtf_ctx() — "4H:bull|1H:bear|15m:bear"
+    // Used by the 4H hard filter in alertService to block counter-trend trades.
+    mtf:        raw.mtf || null,
+
+    // TradingView-native VWAP data (real-time, replaces Yahoo Finance calculateVWAP)
+    // Populated when Pine Script sends vp/vslope/vpos in the webhook payload.
+    vwapPrice:  raw.vp     ? Number(raw.vp)    : null,
+    vwapSlope:  raw.vslope || null,   // "RISING" | "FALLING" | "FLAT"
+    vwapPos:    raw.vpos   || null,   // "AT" | "ABOVE" | "BELOW" | "FAR_ABOVE" | "FAR_BELOW"
+
+    // TradingView-native key levels (real-time, replaces Yahoo Finance getKeyLevels)
+    // null = level not yet established for this session (e.g. ORH before opening range closes)
+    pdh:  raw.pdh  != null && raw.pdh  !== "null" ? Number(raw.pdh)  : null,
+    pdl:  raw.pdl  != null && raw.pdl  !== "null" ? Number(raw.pdl)  : null,
+    pdc:  raw.pdc  != null && raw.pdc  !== "null" ? Number(raw.pdc)  : null,
+    onh:  raw.onh  != null && raw.onh  !== "null" ? Number(raw.onh)  : null,
+    onl:  raw.onl  != null && raw.onl  !== "null" ? Number(raw.onl)  : null,
+    orh:  raw.orh  != null && raw.orh  !== "null" ? Number(raw.orh)  : null,
+    orl:  raw.orl  != null && raw.orl  !== "null" ? Number(raw.orl)  : null,
+    pmh:  raw.pmh  != null && raw.pmh  !== "null" ? Number(raw.pmh)  : null,
+    pml:  raw.pml  != null && raw.pml  !== "null" ? Number(raw.pml)  : null,
+    atr:  raw.atr  ? Number(raw.atr)  : null,
+
     // Placeholders — filled by analysis modules
     bias:       null,
     score:      null,
