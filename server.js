@@ -8,6 +8,7 @@ require("dotenv").config();
 const app = require("./app");
 const logger = require("./src/utils/logger");
 const marketScanner = require("./src/services/marketScanner");
+const pricePoller   = require("./src/services/pricePoller");
 
 const PORT = process.env.PORT || 80;
 
@@ -25,4 +26,8 @@ app.listen(PORT, () => {
   } else {
     logger.warn("[startup] DISCORD_WEBHOOK not configured — market scanner disabled");
   }
+
+  // Always start the price poller — it watches open trades for TP/SL hits.
+  // Only polls when there are open trades, so it's silent on idle days.
+  pricePoller.start();
 });

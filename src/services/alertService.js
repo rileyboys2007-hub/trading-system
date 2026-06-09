@@ -18,6 +18,7 @@
 const logger         = require("../utils/logger");
 const signalStore    = require("./signalStore");
 const discord        = require("./discordService");
+const tradeTracker   = require("./tradeTracker");
 const { SIGNAL_STATUS } = require("../models/signal");
 
 const { getDailyBias }          = require("../analysis/bias");
@@ -618,6 +619,14 @@ async function process(signal) {
         : title;
 
       await discord.send(finalTitle, description, color, fields);
+    }
+
+    // ── Step 8: Record actionable trades for outcome tracking ─────────
+    // Only record if the signal passed the risk gate AND scored high enough
+    // to be a TAKE or STRONG TAKE. The price poller will watch these and
+    // fire Discord notifications when TP1, TP2, or SL is hit.
+    if (!blocked && (finalDecision === "TAKE" || finalDecision === "STRONG TAKE")) {
+      tradeTracker.recordTrade(signal, decision, scoreResult ?? null);
     }
 
     return {
